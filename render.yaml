@@ -1,0 +1,28 @@
+# Render 블루프린트 — 대시보드에서 "New > Blueprint" 로 이 저장소를 고르면 자동 설정됩니다.
+services:
+  - type: web
+    name: wolgyeon
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: SEOUL_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: COLLECT_ON_START
+        value: "1"
+      - key: SEED_SAMPLE
+        value: "0"
