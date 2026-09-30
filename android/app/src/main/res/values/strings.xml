@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">월계온</string>
+    <string name="offline_title">서버에 연결할 수 없어요</string>
+    <string name="offline_body">인터넷 연결을 확인하고 다시 시도해주세요.\n서버가 잠들어 있으면 깨어나는 데 30초 정도 걸릴 수 있어요.</string>
+    <string name="retry">다시 시도</string>
+    <string name="choose_photo">사진 선택</string>
+    <string name="location_denied">위치 권한이 없어서 내 위치를 쓸 수 없어요.</string>
+</resources>
