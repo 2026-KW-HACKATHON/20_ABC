@@ -16,10 +16,11 @@ from . import geo
 
 log = logging.getLogger("wolgyeon.osm")
 
-BBOX = "37.6080,127.0470,37.6350,127.0760"
-QUERY = f"""[out:json][timeout:180][bbox:{BBOX}];
+# 월계동(월계1·2·3동) 전체 + 약간의 여유. 경계선이 잘리지 않도록 넉넉하게 잡음
+BBOX = "37.6030,127.0330,37.6560,127.0800"
+QUERY = f"""[out:json][timeout:240][bbox:{BBOX}];
 (
-  relation["boundary"="administrative"]["name"="월계1동"];
+  relation["boundary"="administrative"]["name"~"^월계[0-9]동$"];
   way["highway"]; way["building"];
   way["waterway"]; way["natural"="water"]; relation["natural"="water"];
   way["leisure"]; way["landuse"];
@@ -41,7 +42,7 @@ def update_osm() -> dict:
     last = None
     for url in SERVERS:
         try:
-            r = httpx.post(url, data={"data": QUERY}, timeout=200,
+            r = httpx.post(url, data={"data": QUERY}, timeout=260,
                            headers={"User-Agent": "WolgyeON/1.0 (community map)"})
             r.raise_for_status()
             raw = r.json()
@@ -53,7 +54,8 @@ def update_osm() -> dict:
             tmp.replace(DATA_DIR / "osm.geojson")
             geo.reset_cache()
             g = geo.base_graph()
-            return {"ok": True, "server": url, "features": len(gj["features"]), "graph": g["stats"],
+            return {"ok": True, "server": url, "features": len(gj["features"]), "area": geo.basemap().get("an"),
+                    "graph": g["stats"],
                     "pois": len(geo.pois())}
         except Exception as e:
             last = f"{url}: {type(e).__name__}: {e}"
@@ -70,7 +72,8 @@ def import_geojson(raw_bytes: bytes) -> dict:
         raise ValueError("파일에 월계1동 행정경계가 없습니다. 쿼리에 경계(relation)가 포함됐는지 확인해주세요.")
     (DATA_DIR / "osm.geojson").write_text(json.dumps(gj, ensure_ascii=False), encoding="utf-8")
     geo.reset_cache()
-    return {"ok": True, "features": len(gj["features"]), "graph": geo.base_graph()["stats"], "pois": len(geo.pois())}
+    return {"ok": True, "features": len(gj["features"]), "area": geo.basemap().get("an"),
+            "graph": geo.base_graph()["stats"], "pois": len(geo.pois())}
 
 
 def fetch_elevation() -> dict:

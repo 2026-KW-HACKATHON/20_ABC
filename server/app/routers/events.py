@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import case, and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..auth import optional_user, require_user
@@ -79,7 +79,12 @@ def list_events(
         first = datetime(y, m, 1)
         nxt = datetime(y + (m == 12), (m % 12) + 1, 1)
         stmt = stmt.where(and_(Event.start_at < nxt, end_or_start >= first))
-    stmt = stmt.order_by(Event.start_at.is_(None), Event.start_at.desc() if when == "past" else Event.start_at).limit(300)
+    if when == "upcoming":
+        # 이미 시작한 긴 전시가 목록 맨 위를 차지하지 않도록: '오늘 기준 다음 날짜' → 먼저 끝나는 순
+        nxt = case((Event.start_at < today, today), else_=Event.start_at)
+        stmt = stmt.order_by(Event.start_at.is_(None), nxt, end_or_start).limit(300)
+    else:
+        stmt = stmt.order_by(Event.start_at.is_(None), Event.start_at.desc() if when == "past" else Event.start_at).limit(300)
     rows = list(db.scalars(stmt))
     ids = [e.id for e in rows]
     st, fv = _stats(db, ids), _favs(db, user, ids)

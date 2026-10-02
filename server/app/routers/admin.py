@@ -14,7 +14,7 @@ from ..config import SEOUL_API_KEY
 from ..db import SessionLocal, get_db
 from ..models import (EVENT_CATEGORIES, PATH_KINDS, REPORT_CATEGORIES, REPORT_STATUS, CollectLog, Construction, Event,
                       PathEdit, Report, User, now)
-from ..services import ai, collect, osm_update
+from ..services import ai, collect, official, osm_update
 from ..services.notify import notify, notify_new_event
 from .events import event_out, iso
 from .mapdata import PathIn, construction_out, path_out, validate_path
@@ -339,6 +339,25 @@ def delete_construction(cid: int, db: Session = Depends(get_db)):
         db.delete(c)
         db.commit()
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ 공식 행사 자료 (구청 주요행사계획)
+@router.post("/official/upload")
+async def official_upload(file: UploadFile = File(...)):
+    raw = await file.read()
+    if len(raw) > 30 * 1024 * 1024:
+        raise HTTPException(413, "파일이 너무 큽니다 (30MB 이하).")
+    name = file.filename or "upload"
+
+    def job():
+        with SessionLocal() as db:
+            return official.import_upload(db, name, raw)
+    if raw[:5] == b"%PDF-":          # PDF는 AI가 읽는 데 1~3분 → 백그라운드 작업
+        return _run_job("official", job)
+    try:
+        return await run_in_threadpool(job)
+    except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise HTTPException(400, f"행사 파일을 읽지 못했습니다: {e}")
 
 
 # ------------------------------------------------------------------ 지도 데이터

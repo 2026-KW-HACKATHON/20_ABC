@@ -86,13 +86,26 @@ def _gemini_schema(s: dict) -> dict:
     return out
 
 
-def _gemini_call(system: str, content: list, schema: dict, max_tokens: int) -> dict:
+def tool_call_long(system: str, content: list, tool: dict, max_tokens: int = 16000) -> dict:
+    """긴 문서(PDF)용: 출력이 길고 시간이 오래 걸리는 호출."""
+    if provider() == "gemini":
+        return _gemini_call(system, content, tool["input_schema"], max_tokens, timeout=240)
+    msg = _get_client().with_options(timeout=240).messages.create(
+        model=ANTHROPIC_MODEL, max_tokens=max_tokens, system=system, tools=[tool],
+        tool_choice={"type": "tool", "name": tool["name"]}, messages=[{"role": "user", "content": content}])
+    for block in msg.content:
+        if getattr(block, "type", "") == "tool_use":
+            return dict(block.input)
+    raise RuntimeError("AI 응답에 결과가 없습니다.")
+
+
+def _gemini_call(system: str, content: list, schema: dict, max_tokens: int, timeout: float = 45) -> dict:
     global _gemini_http
     if _gemini_http is None:
         _gemini_http = httpx.Client(timeout=45)
     parts = []
     for block in content:
-        if block["type"] == "image":
+        if block["type"] in ("image", "document"):
             parts.append({"inlineData": {"mimeType": block["source"]["media_type"], "data": block["source"]["data"]}})
         else:
             parts.append({"text": block["text"]})
@@ -104,7 +117,7 @@ def _gemini_call(system: str, content: list, schema: dict, max_tokens: int) -> d
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     for attempt in range(3):
-        r = _gemini_http.post(url, json=body, headers={"x-goog-api-key": GEMINI_API_KEY})
+        r = _gemini_http.post(url, json=body, headers={"x-goog-api-key": GEMINI_API_KEY}, timeout=timeout)
         if r.status_code in (429, 500, 503) and attempt < 2:
             time.sleep(1.5 * (attempt + 1))
             continue

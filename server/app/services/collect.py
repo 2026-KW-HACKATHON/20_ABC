@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..config import CENTER, NEARBY_KM, SEOUL_API_KEY
@@ -278,11 +278,70 @@ def _guess_cat(text: str) -> str:
     return "community"
 
 
-def kw_location(place: str) -> tuple[float, float]:
+CAMPUS_WORDS = ("광운", "본교", "교내", "캠퍼스")
+
+
+def kw_on_campus(place: str) -> bool:
+    """공지에 적힌 장소가 광운대 안인지. 비었으면 학교 안으로 봄 (온라인·다른 지역이면 False)."""
+    place = (place or "").strip()
+    if not place:
+        return True
+    if any(k in place for k in ("온라인", "비대면", "ZOOM", "Zoom", "zoom", "유튜브")):
+        return False
+    if any(k in place for k in CAMPUS_WORDS) or any(k in place for k in KW_BUILDINGS):
+        return True
+    if re.match(r"^\d+\s*(주년)?", place):            # '80주년기념관'이 잘린 경우 등
+        return True
+    off = ("구청", "시청", "군청", "도청", "공원", "한강", "호텔", "컨벤션", "코엑스", "킨텍스", "벡스코", "서울",
+           "경기", "인천", "대학교", "센터", "(", "역 ", "시장", "광장")
+    if any(k in place for k in off) or re.search(r"(로|길)\s?\d", place):
+        return False
+    return bool(re.search(r"(호|강의실|강당|세미나실|라운지|홀|관|실)(\s|$)", place))
+
+
+def kw_location(place: str) -> tuple[float, float] | tuple[None, None]:
+    """학교 안이면 건물 좌표(모르면 학교 가운데), 학교 밖이면 (None, None) — 엉뚱한 곳에 핀을 찍지 않음."""
+    if not kw_on_campus(place):
+        return None, None
     for key, ll in KW_BUILDINGS.items():
         if key in place:
             return ll
     return KW_CENTER
+
+
+def kw_place_name(place: str) -> str:
+    place = (place or "").strip()
+    if not place:
+        return "광운대학교"
+    if "광운" in place or not kw_on_campus(place):
+        return place
+    return "광운대학교 " + place
+
+
+def clean_kw_title(title: str) -> str:
+    return re.sub(r"\s*(신규게시글|Attachment|첨부파일|NEW)\s*$", "", title or "").strip()
+
+
+def fix_kw_places(db: Session) -> int:
+    """예전 버전이 학교 밖 장소 앞에 '광운대학교'를 붙이고 학교 좌표를 넣은 기록을 바로잡는다. (여러 번 실행해도 안전)"""
+    n = 0
+    for ev in list(db.scalars(select(Event).where(Event.source == "kw"))):
+        vals = {}
+        t = clean_kw_title(ev.title)
+        if t != ev.title:
+            vals["title"] = t
+        pn = ev.place_name or ""
+        rest = pn[len("광운대학교 "):] if pn.startswith("광운대학교 ") else None
+        if rest and not kw_on_campus(rest):
+            vals.update(place_name=rest, lat=None, lng=None)
+        if vals:
+            # updated_at 은 그대로 둠 (고친 기록이 '새 소식'처럼 보이지 않도록)
+            db.execute(update(Event).where(Event.id == ev.id).values(**vals, updated_at=Event.updated_at))
+            n += 1
+    if n:
+        db.commit()
+        db.expire_all()
+    return n
 
 
 def fetch_kw(client: httpx.Client, pages: int = 3, existing: set[str] | None = None) -> list[dict]:
@@ -316,11 +375,11 @@ def fetch_kw(client: httpx.Client, pages: int = 3, existing: set[str] | None = N
         fill_end_date(fill_missing_dates(info, it["title"], body, it["posted"]))
         lat, lng = kw_location(info.get("place", ""))
         out.append({
-            "source": "kw", "source_id": it["duid"], "title": (info.get("title") or it["title"])[:300],
+            "source": "kw", "source_id": it["duid"], "title": clean_kw_title(info.get("title") or it["title"])[:300],
             "category": info.get("category") if info.get("category") in ("culture", "academic", "community") else "academic",
             "start_at": _parse_dt(info.get("start")), "end_at": _parse_dt(info.get("end")),
             "time_text": (info.get("time_text") or "")[:200],
-            "place_name": ("광운대학교 " + info["place"]) if info.get("place") and "광운" not in info["place"] else (info.get("place") or "광운대학교"),
+            "place_name": kw_place_name(info.get("place", "")),
             "lat": lat, "lng": lng, "description": (info.get("summary") or "")[:4000],
             "host": "광운대학교", "url": it["url"],
             "ai_note": f"공지 분류: {it['board_cat'] or '-'} · 게시일 {it['posted'] or '-'} · 대상: {info.get('target') or '-'}"

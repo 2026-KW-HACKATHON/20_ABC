@@ -3,7 +3,7 @@
 //  - 지름길 · 배리어프리(경사·계단 회피): 월계1동 안에서만
 import { api } from "../api.js";
 import { MODES } from "../graph.js";
-import { ICON, closeSheet, esc, fmtDist, fmtMin, openSheet, peekSheet, toast } from "../ui.js";
+import { ICON, closeSheet, esc, fmtDist, fmtMin, openSheet, toast } from "../ui.js";
 
 // 월계1동 전용 기능 이름 (조사 붙이기용: 은/는)
 const DONG_ONLY = { shortcut: "지름길은", accessible: "배리어프리 길찾기는" };
@@ -21,45 +21,31 @@ export async function render({ view, ctx, params }) {
   const markers = {};
   st.avoid = false;
 
-  // 위 패널: 출발·도착을 고르는 동안만 보임. 경로가 나오면 접히고, 같은 기능이 아래 창으로 옮겨감
   view.innerHTML = `<section class="rpanel" aria-label="길찾기">
     <div class="rp-fields">
       <span class="dot"></span>
-      <div class="rp-fwrap"><button class="rp-field" id="f-start" type="button"></button>
-        <button class="rp-me" id="rp-me" type="button" aria-label="내 위치에서 출발">${ICON.locate || ""}내 위치</button></div>
+      <button class="rp-field" id="f-start" type="button"></button>
       <button class="rp-swap" id="rp-swap" type="button" aria-label="출발·도착 바꾸기">${ICON.swap}</button>
       <span class="dot end"></span>
       <button class="rp-field" id="f-end" type="button"></button>
     </div>
-    <div class="seg compact" role="group" aria-label="경로 종류" style="margin-top:8px">${modeButtons()}</div>
-    <form class="row" id="rp-search" style="margin-top:8px;gap:6px" role="search">
-      <input class="input grow" id="rp-q" type="search" placeholder="월계동 장소 검색 (예: 월계역, 광운대)" autocomplete="off" style="padding:7px 11px;font-size:14px">
+    <div class="rp-opts">
+      <div class="seg" role="group" aria-label="경로 종류">${Object.entries(MODES).map(([k, m]) =>
+        `<button type="button" data-mode="${k}" aria-pressed="${st.mode === k}">${m.label}${DONG_ONLY[k] ? `<small class="dong-tag">월계1동</small>` : ""}</button>`).join("")}</div>
+    </div>
+    <form class="row" id="rp-search" style="margin-top:10px;gap:6px" role="search">
+      <input class="input grow" id="rp-q" type="search" placeholder="월계동 장소 검색 (예: 월계역, 광운대)" autocomplete="off" style="padding:8px 11px;font-size:14px">
       <button class="btn sm" type="submit">검색</button>
     </form>
     <div class="quick" id="quick"></div>
-    <div class="rp-foot"><span class="rp-hint" id="rp-hint"></span>
-      <a href="#/plan">메모 경로</a><a href="#/path-edit">길 제보</a></div>
+    <div class="rp-hint" id="rp-hint"></div>
+    <div class="row" style="margin-top:8px;gap:6px">
+      <a class="btn sm grow" href="#/plan">메모 경로 <span class="dong-tag">월계1동</span></a>
+      <a class="btn sm grow" href="#/path-edit">길 제보 <span class="dong-tag">월계1동</span></a>
+    </div>
   </section>`;
 
   const $ = s => view.querySelector(s);
-  function modeButtons() {
-    return Object.entries(MODES).map(([k, m]) =>
-      `<button type="button" data-mode="${k}" aria-pressed="${st.mode === k}">${m.label}${DONG_ONLY[k] ? `<small class="dong-tag">월계1동</small>` : ""}</button>`).join("");
-  }
-  function bindModes(root) {
-    root.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", () => {
-      setMode(b.dataset.mode);
-      if (st.start && st.end) compute();
-    }));
-  }
-  // 경로가 나오면 위 패널을 접음 (아래 창에 출발·도착·경로 종류가 들어감)
-  function compactTop(on) { document.body.classList.toggle("route-compact", on); }
-  async function useMyLocation(which = "start") {
-    const pos = ctx.myPos || await ctx.locate();
-    if (!pos) return;
-    if (!ctx.inService(pos[0], pos[1])) { toast("지금 위치가 월계동 밖이라 출발지로 쓸 수 없어요."); return; }
-    setPoint(which, pos[0], pos[1], "내 위치");
-  }
   const pointName = p => p ? esc(p.name) : "";
   function renderFields() {
     $("#f-start").innerHTML = st.start ? pointName(st.start) : `<span class="ph">출발지 — 지도를 누르거나 아래에서 선택</span>`;
@@ -133,8 +119,8 @@ export async function render({ view, ctx, params }) {
   async function compute() {
     document.body.classList.add("has-route");
     layers.clearLayers();
-    if (!bothInService()) { compactTop(false); return outsideNotice(); }
-    if (DONG_ONLY[st.mode] && !bothInDong()) { compactTop(false); return dongOnlyNotice(); }
+    if (!bothInService()) return outsideNotice();
+    if (DONG_ONLY[st.mode] && !bothInDong()) return dongOnlyNotice();
     openSheet(`<div class="empty"><span class="spinner"></span><br>경로 계산 중…</div>`);
     try { graph = await ctx.getGraph(); } catch (e) { toast(e.message); return; }
     const from = [st.start.lat, st.start.lng], to = [st.end.lat, st.end.lng];
@@ -156,8 +142,7 @@ export async function render({ view, ctx, params }) {
       }
     }
     const all = [main, cmp].filter(Boolean).flatMap(r => r.latlngs);
-    compactTop(!!main);
-    if (all.length) map.fitBounds(L.latLngBounds(all), { paddingTopLeft: [24, 40], paddingBottomRight: [24, Math.min(380, window.innerHeight * 0.5)] });
+    if (all.length) map.fitBounds(L.latLngBounds(all), { paddingTopLeft: [24, 230], paddingBottomRight: [24, Math.min(360, window.innerHeight * 0.45)] });
     showResult(main, cmp, cmpMode, graph, inDong);
   }
 
@@ -229,13 +214,7 @@ export async function render({ view, ctx, params }) {
     const hoursNote = Object.keys(graph.hours).length ? `<p class="small muted" style="margin:8px 0 0">지금 닫혀 있는 쪽문은 경로에서 뺐어요.</p>` : "";
 
     openSheet(`
-      <div class="rs-head">
-        <div class="grow"><div class="rs-pts"><b>${esc(st.start.name)}</b> → <b>${esc(st.end.name)}</b></div>
-          <div class="rs-sum">${m.label} · ${fmtDist(main.total)} · 도보 약 ${fmtMin(main.total, m.speed)}</div></div>
-        <button class="btn sm" type="button" id="rs-swap" aria-label="출발·도착 바꾸기">${ICON.swap}</button>
-        <button class="btn sm" type="button" id="rs-edit">바꾸기</button>
-      </div>
-      <div class="seg compact" role="group" aria-label="경로 종류" id="rs-modes" style="margin-top:10px">${modeButtons()}</div>
+      <h2 style="font-size:17px">${esc(st.start.name)} → ${esc(st.end.name)}</h2>
       <div class="res-cmp"${inDong ? "" : ` style="grid-template-columns:1fr"`}>
         <div class="res-card main ${st.mode === "accessible" ? "bf" : ""}"><div class="k">${m.label}</div><div class="v">${fmtDist(main.total)}</div><div class="tt">도보 약 ${fmtMin(main.total, m.speed)}</div></div>
         ${inDong ? `<div class="res-card"><div class="k">${MODES[cmpMode].label}</div><div class="v">${cmp ? fmtDist(cmp.total) : "없음"}</div><div class="tt">${cmp ? "도보 약 " + fmtMin(cmp.total, MODES[cmpMode].speed) : "이어지는 길 없음"}</div></div>` : ""}
@@ -248,12 +227,7 @@ export async function render({ view, ctx, params }) {
       ${hoursNote}
       ${st.mode !== "normal" ? `<p class="small muted" style="margin:8px 0 0">주황 점선은 공식 지도에 없는 지름길 구간이에요. 실제로 막혀 있으면 알려주세요.</p>` : ""}
       <div class="actions"><a class="btn" href="#/path-edit">막힌 길·새 길 제보</a><button class="btn primary" id="btn-follow" type="button">내 위치 따라가기</button></div>
-      <p class="small muted" style="margin:10px 0 0;text-align:center">창을 아래로 내리면 지도를 넓게 볼 수 있어요</p>
-    `, { peek: true, onClose: () => compactTop(false) });
-    const sb = document.getElementById("sheet-body");
-    bindModes(sb.querySelector("#rs-modes"));
-    sb.querySelector("#rs-edit").addEventListener("click", () => { compactTop(false); closeSheet(); st.armed = "end"; renderFields(); });
-    sb.querySelector("#rs-swap").addEventListener("click", () => { [st.start, st.end] = [st.end, st.start]; setMarker("start"); setMarker("end"); renderFields(); compute(); });
+    `);
     document.getElementById("btn-avoid")?.addEventListener("click", () => { st.avoid = !st.avoid; compute(); });
     document.getElementById("btn-follow")?.addEventListener("click", () => follow());
   }
@@ -263,7 +237,7 @@ export async function render({ view, ctx, params }) {
     if (!navigator.geolocation) { toast("위치를 확인할 수 없는 기기예요."); return; }
     if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; toast("따라가기를 멈췄어요."); return; }
     toast("내 위치를 따라갑니다.");
-    peekSheet(true);
+    closeSheet();
     watchId = navigator.geolocation.watchPosition(p => {
       const pos = [p.coords.latitude, p.coords.longitude];
       ctx.setMyPos(pos);
@@ -286,15 +260,17 @@ export async function render({ view, ctx, params }) {
   });
   function setMode(mode) {
     st.mode = mode;
-    document.querySelectorAll("#view [data-mode], #sheet-body [data-mode]").forEach(x => x.setAttribute("aria-pressed", x.dataset.mode === mode));
+    view.querySelectorAll("[data-mode]").forEach(x => x.setAttribute("aria-pressed", x.dataset.mode === mode));
     if (DONG_ONLY[mode]) {
       const ok = !st.start && !st.end || bothInDong() || (st.start && !st.end && ctx.inArea(st.start.lat, st.start.lng));
       // 두 지점이 다 정해져 있으면 compute()가 안내 창을 띄우므로 토스트는 생략
       ctx.focusDong(true, { fly: !ok || !(st.start && st.end), message: st.start && st.end ? "" : `${DONG_ONLY[mode]} 월계1동에서만 지원돼요.` });
     } else ctx.focusDong(false);
   }
-  bindModes(view);
-  $("#rp-me").addEventListener("click", () => useMyLocation("start"));
+  view.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", () => {
+    setMode(b.dataset.mode);
+    if (st.start && st.end) compute();
+  }));
   $("#rp-search").addEventListener("submit", e => {
     e.preventDefault();
     const q = $("#rp-q").value.trim();
@@ -324,10 +300,6 @@ export async function render({ view, ctx, params }) {
       if (pos) st.start = { lat: pos[0], lng: pos[1], name: "내 위치" };
     }
   }
-  if (!st.start && ctx.myPos && ctx.inService(ctx.myPos[0], ctx.myPos[1])) {   // 내 위치를 알고 있으면 출발지로
-    st.start = { lat: ctx.myPos[0], lng: ctx.myPos[1], name: "내 위치" };
-    if (!st.end) st.armed = "end";
-  }
   setMarker("start"); setMarker("end");
   renderFields();
   quickList();
@@ -340,7 +312,6 @@ export async function render({ view, ctx, params }) {
     map.removeLayer(layers);
     Object.values(markers).forEach(m => m && map.removeLayer(m));
     if (watchId != null) navigator.geolocation.clearWatch(watchId);
-    compactTop(false);
     closeSheet();
   };
 }

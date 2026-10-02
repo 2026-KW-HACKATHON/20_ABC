@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 from collections import defaultdict
 from pathlib import Path
@@ -215,15 +216,22 @@ def dist_m(lat1, lng1, lat2, lng2):
 
 
 # ---------------------------------------------------------------- 배경지도
+AREA_NAME = re.compile(r"^월계[0-9]동$")      # 서비스 범위: 월계동(월계1·2·3동). 정밀 기능(점선)은 월계1동
+
+
 def build_basemap(feats: list[dict]) -> dict:
     boundary, polys, lines, pts = None, [], [], []
+    area: dict[str, list] = {}
     for ft in feats:
         p, geo = ft["properties"], ft["geometry"]
         t = geo["type"]
         name = p.get("name")
-        if p.get("boundary") == "administrative" and t == "Polygon":
-            if p.get("name") == "월계1동" or boundary is None:
-                boundary = _ring(geo["coordinates"][0])
+        if p.get("boundary") == "administrative" and t in ("Polygon", "MultiPolygon"):
+            rings = [geo["coordinates"][0]] if t == "Polygon" else [pg[0] for pg in geo["coordinates"]]
+            if name == "월계1동":
+                boundary = _ring(max(rings, key=len))
+            if name and AREA_NAME.match(name):
+                area[name] = [_ring(rg) for rg in rings]
             continue
         if t == "Point":
             if p.get("railway") == "station" and name:
@@ -275,6 +283,8 @@ def build_basemap(feats: list[dict]) -> dict:
             lines.append([cls, cs])
     if boundary is None:
         raise RuntimeError("OSM 데이터에 월계1동 행정경계가 없습니다.")
+    area_rings = [rg for name in sorted(area) for rg in area[name]] or [boundary]
+    in_area = lambda c: any(_pip(c, rg) for rg in area_rings)  # noqa: E731
 
     labels = [["station", la, ln, n] for _, la, ln, n in pts]
     seen = set()
@@ -287,7 +297,7 @@ def build_basemap(feats: list[dict]) -> dict:
                 biggest[p["name"]] = rg
     for name, rg in biggest.items():
         c = _centroid(_ring(rg))
-        if _pip(c, boundary):
+        if in_area(c):
             labels.append(["campus", *c, name])
             seen.add(name)
     for ft in feats:
@@ -295,7 +305,7 @@ def build_basemap(feats: list[dict]) -> dict:
         if geo["type"] != "Polygon" or not p.get("name") or p["name"] in seen:
             continue
         c = _centroid(_ring(geo["coordinates"][0]))
-        if not _pip(c, boundary):
+        if not in_area(c):
             continue
         if p.get("leisure") == "park":
             labels.append(["park", *c, p["name"]])
@@ -306,7 +316,10 @@ def build_basemap(feats: list[dict]) -> dict:
         else:
             continue
         seen.add(p["name"])
-    return {"b": boundary, "p": polys, "l": lines, "t": labels}
+    lats = [pt[0] for rg in area_rings for pt in rg]
+    lngs = [pt[1] for rg in area_rings for pt in rg]
+    return {"b": boundary, "a": area_rings, "an": sorted(area) or ["월계1동"],
+            "ab": [[min(lats), min(lngs)], [max(lats), max(lngs)]], "p": polys, "l": lines, "t": labels}
 
 
 # ---------------------------------------------------------------- POI
@@ -615,13 +628,16 @@ def apply_overlays(base: dict, path_edits: list[dict], constructions: list[dict]
 
 
 # ---------------------------------------------------------------- 캐시
+BUILD_VERSION = "3"      # 캐시 형식이 바뀌면 올림 (월계동 범위 'a' 추가)
+
+
 def _cached(name: str, builder):
     with _lock:
         if name in _cache:
             return _cache[name]
         src = osm_path()
         cache_file = DATA_DIR / f"cache_{name}.json"
-        stamp = f"{src}:{src.stat().st_mtime_ns}:{(DATA_DIR / 'elevation.json').exists()}"
+        stamp = f"{BUILD_VERSION}:{src}:{src.stat().st_mtime_ns}:{(DATA_DIR / 'elevation.json').exists()}"
         if cache_file.exists():
             try:
                 obj = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -662,3 +678,13 @@ def reset_cache():
 
 def boundary_contains(lat, lng) -> bool:
     return _pip([lat, lng], basemap()["b"])
+
+
+def area_contains(lat, lng) -> bool:
+    """월계동(서비스 범위) 안인지."""
+    return any(_pip([lat, lng], rg) for rg in basemap().get("a") or [basemap()["b"]])
+
+
+def area_bbox() -> tuple[float, float, float, float]:
+    (s, w), (n, e) = basemap().get("ab") or [[37.60, 127.04], [37.65, 127.08]]
+    return s, w, n, e

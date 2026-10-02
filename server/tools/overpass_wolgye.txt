@@ -1,0 +1,15 @@
+[out:json][timeout:240][bbox:37.6030,127.0330,37.6560,127.0800];
+(
+  relation["boundary"="administrative"]["name"~"^월계[0-9]동$"];
+  way["highway"]; way["building"];
+  way["waterway"]; way["natural"="water"]; relation["natural"="water"];
+  way["leisure"]; way["landuse"];
+  way["railway"]; node["railway"="station"];
+  way["amenity"]; node["amenity"];
+  node["shop"]; way["shop"];
+  node["barrier"]; way["barrier"];
+  node["entrance"];
+);
+out body;
+>;
+out skel qt;

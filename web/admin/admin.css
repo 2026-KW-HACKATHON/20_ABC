@@ -49,5 +49,3 @@ pre.log { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 10p
   .split { grid-template-columns: 1fr; }
   .adm-main { padding: 16px; }
 }
-
-.ai-filled { background: #fff8db !important; border-color: #e6c200 !important; }

@@ -2,17 +2,16 @@
 import { api, auth, refreshMe } from "./api.js";
 import { createMap, dongMask, inService, pointInBoundary } from "./basemap.js";
 import { Graph } from "./graph.js";
-import { $, $$, closeSheet, esc, eventState, eventWhen, initSheet, openSheet, toast } from "./ui.js";
+import { $, $$, ago, closeSheet, esc, eventWhen, initSheet, openSheet, toast } from "./ui.js";
 
 import * as newsView from "./views/news.js";
 import * as eventView from "./views/event.js";
 import * as routeView from "./views/route.js";
 import * as planView from "./views/plan.js";
-import * as tipView from "./views/tip.js";
+import * as reportView from "./views/report.js";
 import * as meView from "./views/me.js";
 import * as pathView from "./views/pathedit.js";
 import { initLiveBoard } from "./live.js";
-import { CATS, KINDS, KIND_GROUPS, clusterSvg, evBadge, kindIcon, kindTag, pinSvg } from "./icons.js";
 
 const LAYER_KEY = "wolgyeon.layers";
 
@@ -75,6 +74,7 @@ export const ctx = {
     return [b.reduce((s, p) => s + p[0], 0) / b.length, b.reduce((s, p) => s + p[1], 0) / b.length];
   },
   reloadEvents: () => loadEvents(),
+  reloadReports: () => loadReports(),
   activeEventId: null,
   setActiveEvent(id) {
     this.activeEventId = id;
@@ -84,95 +84,27 @@ export const ctx = {
 };
 window.__wolgyeon = ctx; // 디버깅용
 
-// ------------------------------------------------------------------ 지도 레이어 · 행사 필터
+// ------------------------------------------------------------------ 지도 레이어
 function loadLayerPrefs() {
-  const def = { events: true, constructions: true, satellite: false };
+  const def = { events: true, reports: false, constructions: true, hotspots: false };
   try { return { ...def, ...JSON.parse(localStorage.getItem(LAYER_KEY) || "{}") }; } catch (_) { return def; }
 }
 const layerOn = loadLayerPrefs();
 const layerGroups = {};
-const saveLayers = () => { try { localStorage.setItem(LAYER_KEY, JSON.stringify(layerOn)); } catch (_) {} };
 
-// 행사 필터: only = 전체 / 큰 분류 하나 / 세부 종류 하나만 보기, hidden = 숨길 분류·종류
-const FILTER_KEY = "wolgyeon.filter";
-const filter = (() => {
-  const def = { only: "all", hiddenKinds: [], hiddenCats: [] };
-  try { return { ...def, ...JSON.parse(localStorage.getItem(FILTER_KEY) || "{}") }; } catch (_) { return def; }
-})();
-const saveFilter = () => { try { localStorage.setItem(FILTER_KEY, JSON.stringify(filter)); } catch (_) {} };
-ctx.eventVisible = e => {
-  if (filter.hiddenCats.includes(e.category) || filter.hiddenKinds.includes(e.kind)) return false;
-  if (filter.only === "all") return true;
-  const [t, k] = filter.only.split(":");
-  return t === "cat" ? e.category === k : e.kind === k;
-};
-const filterActive = () => filter.only !== "all" || filter.hiddenKinds.length || filter.hiddenCats.length;
-
-function renderChips() {
-  const cnt = {};
-  ctx.events.filter(e => e.lat != null && ctx.inService(e.lat, e.lng)).forEach(e => { cnt[e.kind] = (cnt[e.kind] || 0) + 1; });
-  const topKinds = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a]).slice(0, 7);
-  const chip = (key, label, icon = "") => `<button class="fchip" type="button" data-only="${key}" aria-pressed="${filter.only === key}">${icon}${label}</button>`;
-  $("#fchips").innerHTML = chip("all", "전체")
-    + Object.entries(CATS).map(([k, c]) => chip(`cat:${k}`, c.label, `<i style="width:8px;height:8px;border-radius:50%;background:${c.color};display:inline-block"></i>`)).join("")
-    + topKinds.map(k => chip(`kind:${k}`, KINDS[k], kindIcon(k, 14))).join("")
-    + `<button class="fchip more${filter.hiddenKinds.length || filter.hiddenCats.length ? " on" : ""}" type="button" id="fchip-more">${filter.hiddenKinds.length + filter.hiddenCats.length ? `숨김 ${filter.hiddenKinds.length + filter.hiddenCats.length}개` : "세부 필터"}</button>`;
-  $$("#fchips [data-only]").forEach(b => b.addEventListener("click", () => {
-    filter.only = filter.only === b.dataset.only ? "all" : b.dataset.only;
-    saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.();
+function setupLayerChips() {
+  const defs = [["events", "행사", "ev"], ["constructions", "공사", "cz"], ["reports", "신고", "rp"], ["hotspots", "문제 구간", "hs"]];
+  $("#layer-chips").innerHTML = defs.map(([k, label, cls]) =>
+    `<button class="lchip ${cls}" type="button" data-layer="${k}" aria-pressed="${layerOn[k]}"><i></i>${label}</button>`).join("");
+  $$("#layer-chips .lchip").forEach(b => b.addEventListener("click", () => {
+    const k = b.dataset.layer;
+    layerOn[k] = !layerOn[k];
+    b.setAttribute("aria-pressed", layerOn[k]);
+    try { localStorage.setItem(LAYER_KEY, JSON.stringify(layerOn)); } catch (_) {}
+    applyLayers();
+    if (k === "reports" && layerOn[k]) loadReports();
+    if (k === "hotspots" && layerOn[k]) loadHotspots();
   }));
-  $("#fchip-more").addEventListener("click", openMapMenu);
-  $("#legend").innerHTML = ["academic", "community", "culture"].map(k => `<span><i style="background:${CATS[k].color}"></i>${CATS[k].short}</span>`).join("");
-}
-
-// ☰ 지도 설정: 지도 종류(일반/위성), 표시할 것, 행사 종류 숨기기
-function openMapMenu() {
-  const on = (k, v) => `aria-pressed="${v}" data-${k}`;
-  const body = openSheet(`
-    <h2 style="font-size:18px">지도 설정</h2>
-    <div class="stack" style="gap:14px;margin-top:8px">
-      <div><div class="small muted" style="margin-bottom:6px">지도 종류</div>
-        <div class="seg"><button type="button" data-sat="0" aria-pressed="${!layerOn.satellite}">일반 지도</button><button type="button" data-sat="1" aria-pressed="${layerOn.satellite}">위성 지도</button></div></div>
-      <div><div class="small muted" style="margin-bottom:6px">지도에 표시</div>
-        <div class="pick"><button type="button" ${on("layer", layerOn.events)}="events">행사</button><button type="button" ${on("layer", layerOn.constructions)}="constructions">공사 구간</button></div></div>
-      <div><div class="row" style="margin-bottom:6px"><span class="small muted grow">행사 종류 — 끄면 지도에서 숨겨요</span><button class="btn sm ghost" type="button" id="mm-reset">모두 보기</button></div>
-        ${Object.entries(KIND_GROUPS).map(([cat, kinds]) => `
-          <div class="kgroup">
-            <button type="button" class="kcat" data-hcat="${cat}" aria-pressed="${!filter.hiddenCats.includes(cat)}"><i style="background:${CATS[cat].color}"></i>${CATS[cat].label}</button>
-            <div class="pick">${kinds.map(k => `<button type="button" data-hkind="${k}" aria-pressed="${!filter.hiddenKinds.includes(k)}">${kindIcon(k, 14)} ${KINDS[k]}</button>`).join("")}</div>
-          </div>`).join("")}
-      </div>
-    </div>`);
-  body.querySelectorAll("[data-sat]").forEach(b => b.addEventListener("click", () => {
-    setSatellite(b.dataset.sat === "1");
-    body.querySelectorAll("[data-sat]").forEach(x => x.setAttribute("aria-pressed", x === b));
-  }));
-  body.querySelectorAll("[data-layer]").forEach(b => b.addEventListener("click", () => {
-    const k = b.dataset.layer; layerOn[k] = !layerOn[k]; b.setAttribute("aria-pressed", layerOn[k]); saveLayers(); applyLayers();
-  }));
-  const toggle = (arr, v) => { const i = arr.indexOf(v); i >= 0 ? arr.splice(i, 1) : arr.push(v); };
-  body.querySelectorAll("[data-hcat]").forEach(b => b.addEventListener("click", () => {
-    toggle(filter.hiddenCats, b.dataset.hcat); b.setAttribute("aria-pressed", !filter.hiddenCats.includes(b.dataset.hcat));
-    saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.();
-  }));
-  body.querySelectorAll("[data-hkind]").forEach(b => b.addEventListener("click", () => {
-    toggle(filter.hiddenKinds, b.dataset.hkind); b.setAttribute("aria-pressed", !filter.hiddenKinds.includes(b.dataset.hkind));
-    saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.();
-  }));
-  body.querySelector("#mm-reset").addEventListener("click", () => {
-    filter.only = "all"; filter.hiddenKinds = []; filter.hiddenCats = []; saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.(); openMapMenu();
-  });
-}
-
-let satCfg = null;
-async function setSatellite(on) {
-  if (on && !satCfg) {
-    try { satCfg = (await api("/api/config")).satellite; } catch (_) { toast("위성 지도를 불러오지 못했어요."); return; }
-  }
-  layerOn.satellite = !!on; saveLayers();
-  ctx.map.wg.setSatellite(!!on, satCfg);
-  $("#btn-sat").setAttribute("aria-pressed", !!on);
-  $("#sat-label").textContent = on ? "지도" : "위성";
 }
 
 function applyLayers() {
@@ -182,21 +114,23 @@ function applyLayers() {
   }
 }
 
+const DROP = `<path class="drop" d="M17 1.5C8.4 1.5 1.5 8.4 1.5 17c0 11.3 15.5 25.5 15.5 25.5S32.5 28.3 32.5 17C32.5 8.4 25.6 1.5 17 1.5z"/>`;
 const CLUSTER_PX = 38;   // 화면에서 이 거리(px) 안에 있는 핀은 하나로 묶음
 
 function pinIcon(ev, showLabel) {
   return L.divIcon({
     className: `ev-pin ${ev.category}${showLabel ? "" : " no-label"}`,
-    html: `${pinSvg(ev.category, ev.kind, 32)}<span class="label">${esc(ev.title)}</span>`,
-    iconSize: [32, 41], iconAnchor: [16, 40],
+    html: `<svg width="30" height="40" viewBox="0 0 34 44" aria-hidden="true">${DROP}<circle class="dot" cx="17" cy="17" r="5.5"/></svg><span class="label">${esc(ev.title)}</span>`,
+    iconSize: [30, 40], iconAnchor: [15, 39],
   });
 }
 
 function clusterIcon(evs, label, showLabel) {
+  const n = evs.length;
   return L.divIcon({
     className: `ev-pin cluster${showLabel ? "" : " no-label"}`,
-    html: `${clusterSvg(evs.length, 36)}<span class="label">${esc(label)}</span>`,
-    iconSize: [36, 47], iconAnchor: [18, 46],
+    html: `<svg width="34" height="45" viewBox="0 0 34 44" aria-hidden="true">${DROP}<text class="cnt" x="17" y="21.5" text-anchor="middle">${n > 99 ? "99+" : n}</text></svg><span class="label">${esc(label)}</span>`,
+    iconSize: [34, 45], iconAnchor: [17, 44],
   });
 }
 
@@ -220,7 +154,7 @@ function renderEventPins() {
   g.clearLayers();
   ctx.eventMarkers.clear();
   const z = map.getZoom();
-  const evs = ctx.events.filter(e => e.lat != null && ctx.inService(e.lat, e.lng) && ctx.eventVisible(e));   // 지도에는 월계동 안, 필터에 맞는 행사만
+  const evs = ctx.events.filter(e => e.lat != null && ctx.inService(e.lat, e.lng));   // 지도에는 월계동 안 행사만
   // 1) 화면 거리 기준으로 묶기 (가까운 일정부터)
   const groups = [];
   for (const ev of evs) {
@@ -262,18 +196,15 @@ function renderEventPins() {
 // 겹친 행사 목록 (아래에서 올라오는 창) → 하나를 고르면 평소 상세 화면
 ctx.openEventList = (ids, title) => {
   ctx.lastList = { ids, title };
-  // 진행 중인 행사 먼저, 그다음 가까운 날짜 순
   const evs = ids.map(id => ctx.events.find(e => e.id === id)).filter(Boolean)
-    .map(e => ({ e, s: eventState(e) }))
-    .sort((a, b) => a.s.rank - b.s.rank || (a.e.start_at || "9999").localeCompare(b.e.start_at || "9999"));
-  const nowCnt = evs.filter(x => x.s.rank === 0).length;
+    .sort((a, b) => (a.start_at || "9999").localeCompare(b.start_at || "9999"));
   const body = openSheet(`
     <h2 style="font-size:18px">${esc(title)}</h2>
-    <p class="small muted" style="margin:0 0 10px">이 자리의 행사 ${evs.length}개${nowCnt ? ` · 지금 진행 중 ${nowCnt}개` : ""}. 보고 싶은 행사를 고르세요.</p>
-    <div class="list">${evs.map(({ e, s }) => `
-      <a class="item" href="#/event/${e.id}">${evBadge(e)}
+    <p class="small muted" style="margin:0 0 10px">이 자리에 행사가 ${evs.length}개 있어요. 보고 싶은 행사를 고르세요.</p>
+    <div class="list">${evs.map(e => `
+      <a class="item" href="#/event/${e.id}">
         <div class="grow">
-          <div class="row wrap" style="gap:6px;margin-bottom:3px"><span class="st-chip ${s.cls}">${s.label}</span>${kindTag(e)}${e.source === "tip" ? `<span class="chip">주민 제보</span>` : ""}${e.is_favorite ? `<span class="chip" style="color:#e8542f">♥ 내 일정</span>` : ""}</div>
+          <div class="row wrap" style="gap:6px;margin-bottom:3px"><span class="chip ${e.category}">${esc(e.category_label)}</span>${e.is_favorite ? `<span class="chip" style="color:#e8542f">♥ 내 일정</span>` : ""}</div>
           <div class="t">${esc(e.title)}</div>
           <div class="m">${esc(eventWhen(e))}${e.place_name ? " · " + esc(e.place_name) : ""}</div>
         </div></a>`).join("")}</div>`);
@@ -283,8 +214,34 @@ async function loadEvents() {
   try {
     ctx.events = await api("/api/events?when=upcoming");
   } catch (e) { toast(e.message); return; }
-  renderChips();
   renderEventPins();
+}
+
+async function loadReports() {
+  const g = layerGroups.reports;
+  try {
+    const rows = await api("/api/reports");
+    g.clearLayers();
+    rows.forEach(r => {
+      L.marker([r.lat, r.lng], { icon: L.divIcon({ className: `rp-dot ${r.status}`, html: "<i></i>", iconSize: [14, 14], iconAnchor: [7, 7] }) })
+        .bindPopup(`<b>${esc(r.category_label)}</b><br>${esc(r.summary || "")}<br><span style="color:#667085">${esc(r.status_label)} · ${ago(r.created_at)}</span>`)
+        .addTo(g);
+    });
+  } catch (e) { /* 공개 목록 실패는 조용히 */ }
+}
+
+async function loadHotspots() {
+  const g = layerGroups.hotspots;
+  try {
+    const rows = await api("/api/reports/hotspots");
+    g.clearLayers();
+    rows.forEach(h => {
+      L.circle([h.lat, h.lng], { radius: h.radius_m, color: "#dc2626", weight: 1.5, fillColor: "#dc2626", fillOpacity: 0.14 })
+        .bindPopup(`<b>문제 반복 구간</b><br>신고 ${h.count}건 (미처리 ${h.open}건)<br>주요 유형: ${esc(h.top_label)}`).addTo(g);
+      L.marker([h.lat, h.lng], { icon: L.divIcon({ className: "hs-label", html: `<span>${h.count}건</span>`, iconSize: [0, 0] }), interactive: false }).addTo(g);
+    });
+    if (layerOn.hotspots && !rows.length) toast("아직 신고가 반복되는 구간이 없어요.");
+  } catch (e) { /* 무시 */ }
 }
 
 function drawConstructions(zones) {
@@ -318,8 +275,8 @@ const routes = [
   [/^\/route$/, routeView, "route"],
   [/^\/plan$/, planView, "route"],
   [/^\/path-edit$/, pathView, "route"],
-  [/^\/tip$/, tipView, "me"],
-  [/^\/settings$/, meView, "me"],
+  [/^\/report$/, reportView, "report"],
+  [/^\/report\/(\d+)$/, reportView, "report"],
   [/^\/me$/, meView, "me"],
   [/^\/login$/, meView, "me"],
   [/^\/notifications$/, meView, "me"],
@@ -337,8 +294,6 @@ function parseHash() {
 async function route() {
   const { path, params } = parseHash();
   if (path + params === current) return;
-  ctx.prevHash = ctx.curHash || "";       // 이전 화면 (상세 화면의 뒤로 버튼용)
-  ctx.curHash = location.hash || "#/map";
   current = path + params;
   navSeq++;
   if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; }
@@ -350,7 +305,7 @@ async function route() {
   if (!matched) { location.hash = "#/map"; return; }
   const [re, mod, tab] = matched;
   $$("#tabbar a").forEach(a => a.classList.toggle("on", a.dataset.tab === tab));
-  closeSheet();
+  if (!/^\/event\//.test(path)) closeSheet();
   if (!mod) { ctx.setActiveEvent(null); return; }
   const m = path.match(re);
   const seq = ++navSeq;
@@ -378,14 +333,11 @@ async function boot() {
     return;
   }
   ctx.base = base;
-  ctx.map = createMap("map", base, { padding: [170, 16] });
-  ["events", "constructions"].forEach(k => { layerGroups[k] = L.layerGroup(); });
+  ctx.map = createMap("map", base, { padding: [110, 16] });
+  ["events", "reports", "constructions", "hotspots"].forEach(k => { layerGroups[k] = L.layerGroup(); });
   ctx.map.on("zoomend", renderEventPins);
-  renderChips();
+  setupLayerChips();
   applyLayers();
-  $("#btn-menu").addEventListener("click", openMapMenu);
-  $("#btn-sat").addEventListener("click", () => setSatellite(!layerOn.satellite));
-  if (layerOn.satellite) setSatellite(true);
 
   $("#btn-locate").addEventListener("click", async () => {
     const pos = await ctx.locate();
@@ -398,6 +350,8 @@ async function boot() {
   auth.onChange(() => { pollBadge(); });
   await route();
   loadEvents();
+  if (layerOn.reports) loadReports();
+  if (layerOn.hotspots) loadHotspots();
   api("/api/map/constructions").then(drawConstructions).catch(() => {});
   refreshMe().then(pollBadge);
   initLiveBoard(ctx);

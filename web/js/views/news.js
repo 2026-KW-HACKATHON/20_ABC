@@ -1,7 +1,6 @@
 // 소식: 다가오는 행사 목록 + 이달의 달력
 import { api, auth } from "../api.js";
-import { evBadge, kindTag } from "../icons.js";
-import { esc, eventState, eventWhen, kstParts, pageHead, todayKst } from "../ui.js";
+import { esc, eventWhen, kstParts, pageHead, todayKst } from "../ui.js";
 
 const CATS = [["", "전체"], ["culture", "문화·예술"], ["academic", "학술·교육"], ["community", "지역·참여"]];
 const state = { mode: "list", cat: "", q: "", ym: null, day: null };
@@ -9,17 +8,15 @@ const state = { mode: "list", cat: "", q: "", ym: null, day: null };
 export async function render({ view, params }) {
   document.body.classList.add("page-open");
   if (params?.get("mode") && auth.loggedIn) { state.mode = params.get("mode"); history.replaceState(null, "", "#/news"); }
-  const focus = params?.get("focus") === "1";
-  if (focus) { state.mode = "list"; history.replaceState(null, "", "#/news"); }
   const t = todayKst();
   if (!state.ym) state.ym = { y: t.y, m: t.m };
   view.innerHTML = `<div class="page">
-    ${pageHead(state.mode === "fav" ? "즐겨찾기" : "동네 소식", { sub: state.mode === "fav" ? "북마크한 행사를 모아봐요" : "광운대·노원구·주민 행사를 한곳에서" })}
+    ${pageHead("동네 소식", { sub: "광운대·노원구 행사를 한곳에서" })}
     <div class="page-body">
       <div class="seg" role="group" aria-label="보기 방식">
         <button type="button" data-mode="list" aria-pressed="${state.mode === "list"}">다가오는 행사</button>
         <button type="button" data-mode="cal" aria-pressed="${state.mode === "cal"}">이달의 달력</button>
-        ${auth.loggedIn ? `<button type="button" data-mode="fav" aria-pressed="${state.mode === "fav"}">즐겨찾기</button>` : ""}
+        ${auth.loggedIn ? `<button type="button" data-mode="fav" aria-pressed="${state.mode === "fav"}">내 일정</button>` : ""}
       </div>
       <div class="row">
         <input class="input grow" id="news-q" type="search" placeholder="행사 이름·장소 검색" value="${esc(state.q)}" autocomplete="off">
@@ -36,7 +33,6 @@ export async function render({ view, params }) {
     timer = setTimeout(() => { state.q = e.target.value.trim(); load(view); }, 300);
   });
   load(view);
-  if (focus) setTimeout(() => view.querySelector("#news-q")?.focus(), 50);
 }
 
 async function load(view) {
@@ -53,15 +49,16 @@ async function load(view) {
   } catch (e) { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   if (state.mode === "fav" && (state.cat || state.q)) rows = rows.filter(r => (!state.cat || r.category === state.cat) && (!state.q || r.title.includes(state.q)));
   if (state.mode === "cal") { body.innerHTML = calendar(rows) + `<div id="cal-list" style="margin-top:14px"></div>`; bindCal(view, rows); return; }
-  body.innerHTML = rows.length ? list(rows) : `<div class="empty">${state.mode === "fav" ? "북마크(즐겨찾기)한 행사가 여기 모여요." : "조건에 맞는 행사가 없어요."}</div>`;
+  body.innerHTML = rows.length ? list(rows) : `<div class="empty">${state.mode === "fav" ? "하트를 누른 행사가 여기 모여요." : "조건에 맞는 행사가 없어요."}</div>`;
 }
 
 function list(rows) {
   return `<div class="list">${rows.map(e => {
+    const p = e.start_at ? kstParts(e.start_at) : null;
     return `<a class="item" href="#/event/${e.id}">
-      ${evBadge(e, 44)}
+      <div class="date-box">${p ? `<b>${p.d}</b><small>${p.m}월 ${p.dow}</small>` : `<b>–</b><small>미정</small>`}</div>
       <div class="grow">
-        <div class="row wrap" style="gap:6px;margin-bottom:3px">${kindTag(e)}<span class="st-chip ${eventState(e).cls}">${eventState(e).label}</span>${e.is_favorite ? `<span class="chip" style="color:#ee3f5b">♥ 즐겨찾기</span>` : ""}</div>
+        <div class="row wrap" style="gap:6px;margin-bottom:3px"><span class="chip ${e.category}">${esc(e.category_label)}</span>${e.is_favorite ? `<span class="chip" style="color:#e8542f">♥ 내 일정</span>` : ""}</div>
         <div class="t">${esc(e.title)}</div>
         <div class="m">${esc(eventWhen(e))}${e.place_name ? " · " + esc(e.place_name) : ""}</div>
         ${e.review_count ? `<div class="m"><span class="stars">★</span> ${e.avg_rating} · 후기 ${e.review_count}</div>` : ""}

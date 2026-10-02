@@ -75,6 +75,11 @@ COLLECT_ON_START = env("COLLECT_ON_START", "0") in ("1", "true", "True")
 
 MAX_UPLOAD_MB = float(env("MAX_UPLOAD_MB", "8"))
 
+# 월계1동 밖 일반 도보 길찾기 · 장소 검색
+ROUTING_URL = env("ROUTING_URL", "https://routing.openstreetmap.de/routed-foot")
+NOMINATIM_URL = env("NOMINATIM_URL", "https://nominatim.openstreetmap.org")
+KAKAO_REST_KEY = env("KAKAO_REST_KEY", "")   # 있으면 장소 검색을 카카오로 (국내 상호 검색이 훨씬 정확)
+
 # 월계1동 중심 (행사 수집 시 거리 필터 기준)
 CENTER = (37.6205, 127.0585)
 NEARBY_KM = float(env("NEARBY_KM", "2.5"))

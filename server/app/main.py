@@ -18,7 +18,7 @@ from . import config
 from .auth import hash_password
 from .db import Base, SessionLocal, engine
 from .models import Event, Favorite, User, now
-from .routers import admin, auth, events, mapdata, me, reports
+from .routers import admin, auth, events, geoproxy, live, mapdata, me, reports
 from .services import ai, geo
 from .services.notify import notify
 
@@ -50,6 +50,11 @@ def bootstrap():
                       source="manual", source_id="sample2"),
             ])
         db.commit()
+        from .services.collect import fix_kw_places
+        from .services.official import import_bundled
+        if fixed := fix_kw_places(db):
+            log.info("광운대 공지 장소 %d건 바로잡음 (학교 밖 장소에 학교 좌표가 들어간 기록)", fixed)
+        import_bundled(db)
     geo.basemap()      # 지도 캐시 미리 만들기
     geo.base_graph()
 
@@ -99,7 +104,7 @@ app = FastAPI(title="월계온 API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-for r in (auth.router, events.router, reports.router, mapdata.router, me.router, admin.router):
+for r in (auth.router, events.router, reports.router, mapdata.router, me.router, admin.router, geoproxy.router, live.router):
     app.include_router(r)
 
 

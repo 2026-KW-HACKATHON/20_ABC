@@ -1,11 +1,11 @@
 // 월계온 서비스워커: 앱 화면은 오프라인에서도 열리고, 지도 데이터는 캐시 후 갱신
-const VERSION = "wolgyeon-v8";  // 앱 파일을 바꾸면 숫자를 올려주세요
+const VERSION = "wolgyeon-v6";  // 앱 파일을 바꾸면 숫자를 올려주세요
 const SHELL = [
   "/", "/index.html", "/css/app.css", "/manifest.webmanifest",
   "/vendor/leaflet/leaflet.js", "/vendor/leaflet/leaflet.css",
-  "/js/app.js", "/js/api.js", "/js/ui.js", "/js/basemap.js", "/js/graph.js", "/js/live.js", "/js/icons.js",
+  "/js/app.js", "/js/api.js", "/js/ui.js", "/js/basemap.js", "/js/graph.js", "/js/live.js",
   "/js/views/news.js", "/js/views/event.js", "/js/views/route.js", "/js/views/plan.js",
-  "/js/views/tip.js", "/js/views/me.js", "/js/views/pathedit.js",
+  "/js/views/report.js", "/js/views/me.js", "/js/views/pathedit.js",
   "/icons/icon-192.png",
 ];
 self.addEventListener("install", e => {
