@@ -13,8 +13,8 @@ android {
         applicationId = "kr.wolgyeon.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         buildConfigField("String", "SERVER_URL", "\"${serverUrl.trimEnd('/')}\"")
     }
 
@@ -38,4 +38,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")     // 15분마다 알림 확인 (FeedWorker)
 }

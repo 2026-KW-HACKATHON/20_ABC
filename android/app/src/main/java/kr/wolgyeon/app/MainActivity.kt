@@ -9,7 +9,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.provider.MediaStore
 import android.view.View
 import android.webkit.GeolocationPermissions
@@ -40,8 +42,13 @@ import java.io.File
  * 월계온 웹앱을 감싸는 앱.
  * - 서버 주소: gradle.properties 의 wolgyeonServerUrl
  * - 위치 권한, 카메라 촬영/갤러리 선택, 뒤로가기, 오프라인 화면을 처리
+ * - 휴대폰 알림: FeedWorker(15분마다 서버 확인) + AppBridge(웹 설정·로그인 토큰 저장)
  */
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        const val EXTRA_LINK = "link"       // 알림을 눌렀을 때 열 앱 안 화면 (예: #/event/12)
+    }
 
     private lateinit var web: WebView
     private lateinit var progress: ProgressBar
@@ -66,6 +73,41 @@ class MainActivity : AppCompatActivity() {
         if (!granted) Toast.makeText(this, R.string.location_denied, Toast.LENGTH_SHORT).show()
         geoCallback = null
         geoOrigin = null
+    }
+
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        reportNotifPermission()
+    }
+
+    /** 웹 설정 화면에서 '휴대폰 알림 받기'를 켤 때 */
+    fun askNotificationPermission() {
+        when {
+            Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED ->
+                notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            !Notifier.permitted(this) -> {        // 시스템 설정에서 알림을 꺼 둔 경우 → 앱 알림 설정 화면으로
+                try {
+                    startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+                } catch (_: ActivityNotFoundException) { }
+            }
+            else -> reportNotifPermission()
+        }
+    }
+
+    private fun reportNotifPermission() {
+        val st = if (Notifier.permitted(this)) "granted" else "denied"
+        if (st == "granted") FeedWorker.runNow(this)
+        web.evaluateJavascript("window.__wgNotifPerm && window.__wgNotifPerm('$st')", null)
+    }
+
+    private fun linkUrl(intent: Intent?): String? {
+        val link = intent?.getStringExtra(EXTRA_LINK)?.takeIf { it.startsWith("#/") } ?: return null
+        return "$serverUrl/$link"
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        linkUrl(intent)?.let { web.loadUrl(it) }
     }
 
     private val pickImage = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
@@ -193,7 +235,12 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        if (savedInstanceState != null) web.restoreState(savedInstanceState) else web.loadUrl(serverUrl)
+        web.addJavascriptInterface(AppBridge(this), "WolgyeonAndroid")
+        Notifier.ensureChannels(this)
+        FeedWorker.schedule(this)
+        FeedWorker.runNow(this)          // 1분 간격 확인 체인 시작
+
+        if (savedInstanceState != null) web.restoreState(savedInstanceState) else web.loadUrl(linkUrl(intent) ?: serverUrl)
     }
 
     /** 사진이면 카메라 촬영 + 갤러리, 그 밖의 파일(관리자 지도 파일 등)은 파일 선택 */
