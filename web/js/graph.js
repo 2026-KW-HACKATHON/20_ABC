@@ -6,7 +6,7 @@ export const F = { INSIDE: 1, GATE: 2, RESTRICT: 4, STAIRS: 8, STEEP: 16, BLOCK:
 export const MODES = {
   shortcut: { label: "지름길", speed: 67 },
   normal: { label: "일반 도보", speed: 67 },
-  accessible: { label: "배리어프리", speed: 50 },
+  accessible: { label: "편한 길 찾기(배리어프리)", btn: `편한 길 찾기<span class="mode-sub">(배리어프리)</span>`, speed: 50 },
 };
 
 const KX = 111320 * Math.cos(37.62 * Math.PI / 180), KY = 110540;
@@ -201,93 +201,5 @@ export class Graph {
       if (t === T.CROSS || t === T.BRIDGE || (f & (F.INSIDE | F.CUSTOM | F.GATE))) out.push([this.n[result.nodes[k]], this.n[result.nodes[k + 1]]]);
     });
     return out;
-  }
-
-  /* 메모 경유 루트
-     needs: [{text, cats:[...]}], pois: [{name,cat,lat,lng}], start/end: [lat,lng] (end 없으면 출발지로 복귀)
-     → 모든 필요를 채우는 가게 조합과 순서 중 가장 짧은 것 (부분집합 DP) */
-  planStops(start, end, needs, pois, mode = "shortcut", o = {}) {
-    const opt = this.options(o);
-    const MAX_NEEDS = 8, MAX_CAND = 16;
-    const usable = needs.map((nd, i) => ({ ...nd, i })).filter(nd => nd.cats.length);
-    const missing = [];
-    const perNeed = [];
-    for (const nd of usable) {
-      const matches = pois.filter(p => nd.cats.includes(p.cat))
-        .map(p => ({ p, d: distM(start, [p.lat, p.lng]) + (end ? distM(end, [p.lat, p.lng]) : 0) }))
-        .filter(x => x.d < 5000).sort((a, b) => a.d - b.d);
-      if (!matches.length) missing.push(nd); else perNeed.push({ nd, matches });
-    }
-    const overflow = perNeed.slice(MAX_NEEDS).map(x => ({ ...x.nd, overflow: true }));   // 한 번에 8가지까지
-    const kept = perNeed.slice(0, MAX_NEEDS);
-    const needList = kept.map(x => x.nd);
-    // 필요마다 후보 자리를 고르게 나눠 가짐 (앞 항목이 자리를 다 차지하지 않도록)
-    const share = Math.max(1, Math.floor(MAX_CAND / Math.max(1, kept.length)));
-    const cand = new Map();
-    for (let round = 0; round < share; round++) {
-      for (const { matches } of kept) {
-        const m = matches[round];
-        if (m && cand.size < MAX_CAND) cand.set(`${m.p.lat},${m.p.lng},${m.p.name}`, m.p);
-      }
-    }
-    missing.push(...overflow);
-    const C = [...cand.values()];
-    if (!needList.length || !C.length) return { ok: false, missing, noCats: needs.filter(n => !n.cats.length) };
-
-    const pts = [start, ...C.map(p => [p.lat, p.lng]), end || start];
-    const near = pts.map(p => this.nearest(p[0], p[1], mode, opt));
-    if (near.some(x => !x.length)) return { ok: false, missing, noCats: [], error: "경로를 만들 수 없는 위치가 있어요." };
-    const runs = near.map(src => this.search(src, mode, opt));
-    const M = pts.length;
-    const D = Array.from({ length: M }, (_, i) => Array.from({ length: M }, (_, j) => {
-      if (i === j) return 0;
-      let b = Infinity;
-      for (const [node, acc] of near[j]) b = Math.min(b, runs[i].dist[node] + acc);
-      return b;
-    }));
-    const cover = C.map(p => needList.reduce((m, nd, k) => m | (nd.cats.includes(p.cat) ? 1 << k : 0), 0));
-    const FULL = (1 << needList.length) - 1;
-    const dp = new Map(), par = new Map();
-    const key = (mask, c) => mask * 64 + c;
-    C.forEach((_, c) => {
-      const k = key(cover[c], c), v = D[0][c + 1];
-      if (v < (dp.get(k) ?? Infinity)) { dp.set(k, v); par.set(k, -1); }
-    });
-    for (let mask = 1; mask <= FULL; mask++) {
-      for (let c = 0; c < C.length; c++) {
-        const cur = dp.get(key(mask, c));
-        if (cur === undefined || cur === Infinity) continue;
-        for (let c2 = 0; c2 < C.length; c2++) {
-          if (!(cover[c2] & ~mask)) continue;
-          const nm = mask | cover[c2], v = cur + D[c + 1][c2 + 1], k2 = key(nm, c2);
-          if (v < (dp.get(k2) ?? Infinity)) { dp.set(k2, v); par.set(k2, key(mask, c)); }
-        }
-      }
-    }
-    let best = Infinity, bestK = null;
-    C.forEach((_, c) => {
-      const v = dp.get(key(FULL, c));
-      if (v !== undefined && v + D[c + 1][M - 1] < best) { best = v + D[c + 1][M - 1]; bestK = key(FULL, c); }
-    });
-    if (bestK === null) return { ok: false, missing, noCats: [], error: "가게까지 가는 길을 찾지 못했어요." };
-    const order = [];
-    for (let k = bestK; k !== -1; k = par.get(k)) order.push(k % 64);
-    order.reverse();
-    // 구간별 실제 경로
-    const seq = [0, ...order.map(c => c + 1), M - 1];
-    let latlngs = [], length = 0, allEdges = [];
-    for (let s = 0; s + 1 < seq.length; s++) {
-      const i = seq[s], j = seq[s + 1];
-      let bestN = -1, bv = Infinity;
-      for (const [node, acc] of near[j]) { const v = runs[i].dist[node] + acc; if (v < bv) { bv = v; bestN = node; } }
-      if (bestN < 0) continue;
-      const tr = this._trace(runs[i].prev, runs[i].pe, bestN);
-      tr.edges.forEach(ei => { length += this.e[ei][2]; allEdges.push(ei); });
-      latlngs.push(pts[i], ...tr.nodes.map(x => this.n[x]), pts[j]);
-    }
-    const stops = order.map(c => ({ ...C[c], covers: needList.filter((_, k) => cover[c] & (1 << k)).map(nd => nd.text) }));
-    const coveredTexts = new Set(stops.flatMap(s => s.covers));
-    stops.forEach(s => { s.covers = s.covers.filter(t => { if (coveredTexts.has(t)) { coveredTexts.delete(t); return true; } return false; }); });
-    return { ok: true, stops, latlngs, length, minutes: length / MODES[mode].speed, missing, noCats: needs.filter(n => !n.cats.length), edges: allEdges };
   }
 }

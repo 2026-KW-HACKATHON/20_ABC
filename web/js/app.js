@@ -2,16 +2,20 @@
 import { api, auth, refreshMe } from "./api.js";
 import { createMap, dongMask, inService, pointInBoundary } from "./basemap.js";
 import { Graph } from "./graph.js";
-import { $, $$, ago, closeSheet, esc, eventWhen, initSheet, openSheet, toast } from "./ui.js";
+import { $, $$, closeSheet, esc, eventState, eventWhen, initSheet, openSheet, toast } from "./ui.js";
 
 import * as newsView from "./views/news.js";
 import * as eventView from "./views/event.js";
 import * as routeView from "./views/route.js";
-import * as planView from "./views/plan.js";
-import * as reportView from "./views/report.js";
+import * as tipView from "./views/tip.js";
 import * as meView from "./views/me.js";
 import * as pathView from "./views/pathedit.js";
 import { initLiveBoard } from "./live.js";
+import { initSfx, setSfx, sfxOn } from "./sfx.js";
+import { IS_IOS, initInstallPrompt } from "./install.js";
+import { initPrefs } from "./prefs.js";
+import { initLivePush } from "./push.js";
+import { CATS, KINDS, KIND_GROUPS, clusterSvg, evBadge, kindIcon, kindTag, pinSvg } from "./icons.js";
 
 const LAYER_KEY = "wolgyeon.layers";
 
@@ -40,23 +44,86 @@ export const ctx = {
   inService(lat, lng) { return this.base && inService(this.base, lat, lng); },           // 월계동 (지도·길찾기 범위)
   async locate({ silent = false } = {}) {
     if (!navigator.geolocation) { if (!silent) toast("이 기기에서는 위치를 확인할 수 없습니다."); return null; }
-    return new Promise(resolve => {
-      navigator.geolocation.getCurrentPosition(p => {
-        this.setMyPos([p.coords.latitude, p.coords.longitude]);
-        resolve(this.myPos);
-      }, err => {
-        if (!silent) toast(err.code === 1 ? "위치 권한을 허용하면 내 위치를 쓸 수 있어요." : "현재 위치를 확인하지 못했습니다.");
-        resolve(null);
-      }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 });
-    });
+    if (!window.isSecureContext) {          // 아이폰 사파리·크롬 모두 https 주소에서만 위치를 줌
+      if (!silent) toast("위치는 https 주소로 접속했을 때만 쓸 수 있어요.", 4000);
+      return null;
+    }
+    // 1차: 정밀 위치(GPS). 실내 등에서 늦거나 실패하면(아이폰에서 자주) 2차: 일반 위치(와이파이·기지국)로 다시 시도
+    const ask = opts => new Promise(res => navigator.geolocation.getCurrentPosition(p => res({ p }), err => res({ err }), opts));
+    let r = await ask({ enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 });
+    if (r.err && r.err.code !== 1) r = await ask({ enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 });
+    if (r.p) {
+      this.setMyPos([r.p.coords.latitude, r.p.coords.longitude], r.p.coords.accuracy);
+      this.startTracking();            // 위치를 한 번 받으면 그다음부터 2초마다 점만 옮김
+      return this.myPos;
+    }
+    if (!silent) {
+      if (r.err.code === 1) toast(IS_IOS
+        ? "위치 권한이 꺼져 있어요. 아이폰 설정 → 개인정보 보호 및 보안 → 위치 서비스 → Safari 웹사이트 → '앱을 사용하는 동안'으로 바꾼 뒤 다시 눌러주세요."
+        : "위치 권한을 허용하면 내 위치를 쓸 수 있어요.", IS_IOS ? 7000 : 2600);
+      else toast("현재 위치를 확인하지 못했습니다. 잠시 후 다시 눌러주세요.");
+    }
+    return null;
   },
-  setMyPos(pos) {
+  setMyPos(pos, accuracy) {
     this.myPos = pos;
     if (!this._me) {
-      this._me = L.marker(pos, { icon: L.divIcon({ className: "me-dot", html: "<i></i>", iconSize: [18, 18], iconAnchor: [9, 9] }), interactive: false, zIndexOffset: 800 }).addTo(this.map);
+      this._me = L.marker(pos, { icon: L.divIcon({ className: "me-dot", html: "<i></i>", iconSize: [18, 18], iconAnchor: [9, 9] }), interactive: false, keyboard: false, zIndexOffset: 800 }).addTo(this.map);
+      this._meAcc = L.circle(pos, { radius: 1, interactive: false, stroke: false, fillColor: "#2563eb", fillOpacity: 0.12 }).addTo(this.map);
     } else this._me.setLatLng(pos);
+    // 정확도 원: 오차가 클 때만 (15m 이상) 옅게 표시
+    if (accuracy != null) {
+      this._meAcc.setLatLng(pos).setRadius(accuracy >= 15 ? Math.min(accuracy, 300) : 0);
+    } else this._meAcc.setLatLng(pos);
   },
-  // 월계1동 전용 기능(지름길·배리어프리·메모 경로·길 제보)을 쓸 때 동 영역을 다시 강조
+  /* 실시간 내 위치: 2초마다 지도 위 '내 위치' 점만 옮김.
+     지도를 움직이거나 화면을 다시 그리지 않아서 다른 기능에는 영향이 없음.
+     watchPosition 으로 받은 최신 위치를 2초마다 반영하고, 위치 소식이 끊기면(가만히 있을 때 일부 기기) 직접 다시 물어봄.
+     앱이 뒤로 가면 멈추고, 다시 보이면 이어서 함. */
+  startTracking() {
+    if (this._track || !navigator.geolocation) return;
+    const t = this._track = { watch: null, timer: null, latest: null, shown: null, asking: false };
+    const opts = { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 };
+    const got = p => { t.latest = p; };
+    const apply = () => {
+      const p = t.latest;
+      if (!p) return;
+      const pos = [+p.coords.latitude.toFixed(7), +p.coords.longitude.toFixed(7)], acc = Math.round(p.coords.accuracy || 0);
+      const s = t.shown;
+      if (s && Math.abs(s[0] - pos[0]) < 5e-6 && Math.abs(s[1] - pos[1]) < 5e-6 && s[2] === acc) return;   // 0.5m 안쪽 변화는 무시
+      t.shown = [pos[0], pos[1], acc];
+      this.setMyPos(pos, acc);
+    };
+    const start = () => {
+      if (t.watch == null) t.watch = navigator.geolocation.watchPosition(got, err => { if (err.code === 1) this.stopTracking(); },
+        IS_IOS ? { enableHighAccuracy: true, maximumAge: 0 } : opts);   // 아이폰: timeout을 두면 실내에서 계속 실패만 남김
+      if (!t.timer) t.timer = setInterval(() => {
+        if (document.hidden) return;
+        if (!IS_IOS && (!t.latest || Date.now() - t.latest.timestamp > 4000) && !t.asking) {
+          t.asking = true;
+          navigator.geolocation.getCurrentPosition(p => { t.asking = false; got(p); apply(); }, () => { t.asking = false; },
+            { enableHighAccuracy: true, maximumAge: 1500, timeout: 8000 });
+        }
+        apply();
+      }, 2000);
+    };
+    const pause = () => {
+      if (t.watch != null) navigator.geolocation.clearWatch(t.watch);
+      clearInterval(t.timer); t.watch = null; t.timer = null;
+    };
+    t.pause = pause;
+    t.onVis = () => (document.hidden ? pause() : start());
+    document.addEventListener("visibilitychange", t.onVis);
+    start();
+  },
+  stopTracking() {
+    const t = this._track;
+    if (!t) return;
+    t.pause();
+    document.removeEventListener("visibilitychange", t.onVis);
+    this._track = null;
+  },
+  // 월계1동 전용 기능(지름길·편한 길 찾기·길 제보)을 쓸 때 동 영역을 다시 강조
   focusDong(on, { fly = true, message = "" } = {}) {
     if (!this._mask) this._mask = dongMask(this.base);
     if (on) {
@@ -74,7 +141,6 @@ export const ctx = {
     return [b.reduce((s, p) => s + p[0], 0) / b.length, b.reduce((s, p) => s + p[1], 0) / b.length];
   },
   reloadEvents: () => loadEvents(),
-  reloadReports: () => loadReports(),
   activeEventId: null,
   setActiveEvent(id) {
     this.activeEventId = id;
@@ -84,27 +150,102 @@ export const ctx = {
 };
 window.__wolgyeon = ctx; // 디버깅용
 
-// ------------------------------------------------------------------ 지도 레이어
+// ------------------------------------------------------------------ 지도 레이어 · 행사 필터
 function loadLayerPrefs() {
-  const def = { events: true, reports: false, constructions: true, hotspots: false };
+  const def = { events: true, constructions: true, satellite: false };
   try { return { ...def, ...JSON.parse(localStorage.getItem(LAYER_KEY) || "{}") }; } catch (_) { return def; }
 }
 const layerOn = loadLayerPrefs();
 const layerGroups = {};
+const saveLayers = () => { try { localStorage.setItem(LAYER_KEY, JSON.stringify(layerOn)); } catch (_) {} };
 
-function setupLayerChips() {
-  const defs = [["events", "행사", "ev"], ["constructions", "공사", "cz"], ["reports", "신고", "rp"], ["hotspots", "문제 구간", "hs"]];
-  $("#layer-chips").innerHTML = defs.map(([k, label, cls]) =>
-    `<button class="lchip ${cls}" type="button" data-layer="${k}" aria-pressed="${layerOn[k]}"><i></i>${label}</button>`).join("");
-  $$("#layer-chips .lchip").forEach(b => b.addEventListener("click", () => {
-    const k = b.dataset.layer;
-    layerOn[k] = !layerOn[k];
-    b.setAttribute("aria-pressed", layerOn[k]);
-    try { localStorage.setItem(LAYER_KEY, JSON.stringify(layerOn)); } catch (_) {}
-    applyLayers();
-    if (k === "reports" && layerOn[k]) loadReports();
-    if (k === "hotspots" && layerOn[k]) loadHotspots();
+// 행사 필터: only = 전체 / 큰 분류 하나 / 세부 종류 하나만 보기, hidden = 숨길 분류·종류
+const FILTER_KEY = "wolgyeon.filter";
+const filter = (() => {
+  const def = { only: "all", hiddenKinds: [], hiddenCats: [] };
+  try { return { ...def, ...JSON.parse(localStorage.getItem(FILTER_KEY) || "{}") }; } catch (_) { return def; }
+})();
+const saveFilter = () => { try { localStorage.setItem(FILTER_KEY, JSON.stringify(filter)); } catch (_) {} };
+ctx.eventVisible = e => {
+  if (filter.hiddenCats.includes(e.category) || filter.hiddenKinds.includes(e.kind)) return false;
+  if (filter.only === "all") return true;
+  const [t, k] = filter.only.split(":");
+  return t === "cat" ? e.category === k : e.kind === k;
+};
+const filterActive = () => filter.only !== "all" || filter.hiddenKinds.length || filter.hiddenCats.length;
+
+function renderChips() {
+  const cnt = {};
+  ctx.events.filter(e => e.lat != null && ctx.inService(e.lat, e.lng)).forEach(e => { cnt[e.kind] = (cnt[e.kind] || 0) + 1; });
+  const topKinds = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a]).slice(0, 7);
+  const chip = (key, label, icon = "") => `<button class="fchip" type="button" data-only="${key}" aria-pressed="${filter.only === key}">${icon}${label}</button>`;
+  $("#fchips").innerHTML = chip("all", "전체")
+    + Object.entries(CATS).map(([k, c]) => chip(`cat:${k}`, c.label, `<i style="width:8px;height:8px;border-radius:50%;background:${c.color};display:inline-block"></i>`)).join("")
+    + topKinds.map(k => chip(`kind:${k}`, KINDS[k], kindIcon(k, 14))).join("")
+    + `<button class="fchip more${filter.hiddenKinds.length || filter.hiddenCats.length ? " on" : ""}" type="button" id="fchip-more">${filter.hiddenKinds.length + filter.hiddenCats.length ? `숨김 ${filter.hiddenKinds.length + filter.hiddenCats.length}개` : "세부 필터"}</button>`;
+  $$("#fchips [data-only]").forEach(b => b.addEventListener("click", () => {
+    filter.only = filter.only === b.dataset.only ? "all" : b.dataset.only;
+    saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.();
   }));
+  $("#fchip-more").addEventListener("click", openMapMenu);
+  $("#legend").innerHTML = ["academic", "community", "culture"].map(k => `<span><i style="background:${CATS[k].color}"></i>${CATS[k].short}</span>`).join("")
+    + (ctx.base.ao && ctx.base.ao.length ? `<span class="lg-line"><b class="d1"></b>월계1동</span><span class="lg-line"><b class="d0"></b>월계동</span>` : "");
+}
+
+// ☰ 지도 설정: 지도 종류(일반/위성), 표시할 것, 행사 종류 숨기기
+function openMapMenu() {
+  const on = (k, v) => `aria-pressed="${v}" data-${k}`;
+  const body = openSheet(`
+    <h2 style="font-size:18px">지도 설정</h2>
+    <div class="stack" style="gap:14px;margin-top:8px">
+      <div><div class="small muted" style="margin-bottom:6px">버튼 효과음</div>
+        <div class="seg"><button type="button" data-sfx="1" aria-pressed="${sfxOn()}">켜기</button><button type="button" data-sfx="0" aria-pressed="${!sfxOn()}">끄기</button></div></div>
+      <div><div class="small muted" style="margin-bottom:6px">지도 종류</div>
+        <div class="seg"><button type="button" data-sat="0" aria-pressed="${!layerOn.satellite}">일반 지도</button><button type="button" data-sat="1" aria-pressed="${layerOn.satellite}">위성 지도</button></div></div>
+      <div><div class="small muted" style="margin-bottom:6px">지도에 표시</div>
+        <div class="pick"><button type="button" ${on("layer", layerOn.events)}="events">행사</button><button type="button" ${on("layer", layerOn.constructions)}="constructions">공사 구간</button></div></div>
+      <div><div class="row" style="margin-bottom:6px"><span class="small muted grow">행사 종류 — 끄면 지도에서 숨겨요</span><button class="btn sm ghost" type="button" id="mm-reset">모두 보기</button></div>
+        ${Object.entries(KIND_GROUPS).map(([cat, kinds]) => `
+          <div class="kgroup">
+            <button type="button" class="kcat" data-hcat="${cat}" aria-pressed="${!filter.hiddenCats.includes(cat)}"><i style="background:${CATS[cat].color}"></i>${CATS[cat].label}</button>
+            <div class="pick">${kinds.map(k => `<button type="button" data-hkind="${k}" aria-pressed="${!filter.hiddenKinds.includes(k)}">${kindIcon(k, 14)} ${KINDS[k]}</button>`).join("")}</div>
+          </div>`).join("")}
+      </div>
+    </div>`);
+  body.querySelectorAll("[data-sfx]").forEach(b => b.addEventListener("click", () => {
+    setSfx(b.dataset.sfx === "1");
+    body.querySelectorAll("[data-sfx]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  }));
+  body.querySelectorAll("[data-sat]").forEach(b => b.addEventListener("click", () => {
+    setSatellite(b.dataset.sat === "1");
+    body.querySelectorAll("[data-sat]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  }));
+  body.querySelectorAll("[data-layer]").forEach(b => b.addEventListener("click", () => {
+    const k = b.dataset.layer; layerOn[k] = !layerOn[k]; b.setAttribute("aria-pressed", layerOn[k]); saveLayers(); applyLayers();
+  }));
+  const toggle = (arr, v) => { const i = arr.indexOf(v); i >= 0 ? arr.splice(i, 1) : arr.push(v); };
+  body.querySelectorAll("[data-hcat]").forEach(b => b.addEventListener("click", () => {
+    toggle(filter.hiddenCats, b.dataset.hcat); b.setAttribute("aria-pressed", !filter.hiddenCats.includes(b.dataset.hcat));
+    saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.();
+  }));
+  body.querySelectorAll("[data-hkind]").forEach(b => b.addEventListener("click", () => {
+    toggle(filter.hiddenKinds, b.dataset.hkind); b.setAttribute("aria-pressed", !filter.hiddenKinds.includes(b.dataset.hkind));
+    saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.();
+  }));
+  body.querySelector("#mm-reset").addEventListener("click", () => {
+    filter.only = "all"; filter.hiddenKinds = []; filter.hiddenCats = []; saveFilter(); renderChips(); renderEventPins(); ctx.refreshLive?.(); openMapMenu();
+  });
+}
+
+let satCfg = null;
+async function setSatellite(on) {
+  if (on && !satCfg) {
+    try { satCfg = (await api("/api/config")).satellite; } catch (_) { toast("위성 지도를 불러오지 못했어요."); return; }
+  }
+  layerOn.satellite = !!on; saveLayers();
+  ctx.map.wg.setSatellite(!!on, satCfg);
+  $("#btn-sat").setAttribute("aria-pressed", !!on);
+  $("#sat-label").textContent = on ? "지도" : "위성";
 }
 
 function applyLayers() {
@@ -114,23 +255,24 @@ function applyLayers() {
   }
 }
 
-const DROP = `<path class="drop" d="M17 1.5C8.4 1.5 1.5 8.4 1.5 17c0 11.3 15.5 25.5 15.5 25.5S32.5 28.3 32.5 17C32.5 8.4 25.6 1.5 17 1.5z"/>`;
 const CLUSTER_PX = 38;   // 화면에서 이 거리(px) 안에 있는 핀은 하나로 묶음
+
+// 즐겨찾기한 행사가 있으면 핀 오른쪽 위에 작은 하트
+const FAV_BADGE = `<i class="pin-fav" aria-label="즐겨찾기" style="position:absolute;top:-12px;right:-14px"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 3 4.5 6.7 4.5c2.1 0 3.6 1.1 4.3 2.4h2c.7-1.3 2.2-2.4 4.3-2.4 3.7 0 5.8 3.9 4.3 7.3C19.5 16.4 12 21 12 21z"/></svg></i>`;
 
 function pinIcon(ev, showLabel) {
   return L.divIcon({
     className: `ev-pin ${ev.category}${showLabel ? "" : " no-label"}`,
-    html: `<svg width="30" height="40" viewBox="0 0 34 44" aria-hidden="true">${DROP}<circle class="dot" cx="17" cy="17" r="5.5"/></svg><span class="label">${esc(ev.title)}</span>`,
-    iconSize: [30, 40], iconAnchor: [15, 39],
+    html: `${pinSvg(ev.category, ev.kind, 32)}${ev.is_favorite ? FAV_BADGE : ""}<span class="label">${esc(ev.title)}</span>`,
+    iconSize: [32, 41], iconAnchor: [16, 40],
   });
 }
 
 function clusterIcon(evs, label, showLabel) {
-  const n = evs.length;
   return L.divIcon({
     className: `ev-pin cluster${showLabel ? "" : " no-label"}`,
-    html: `<svg width="34" height="45" viewBox="0 0 34 44" aria-hidden="true">${DROP}<text class="cnt" x="17" y="21.5" text-anchor="middle">${n > 99 ? "99+" : n}</text></svg><span class="label">${esc(label)}</span>`,
-    iconSize: [34, 45], iconAnchor: [17, 44],
+    html: `${clusterSvg(evs.length, 36)}${evs.some(e => e.is_favorite) ? FAV_BADGE : ""}<span class="label">${esc(label)}</span>`,
+    iconSize: [36, 47], iconAnchor: [18, 46],
   });
 }
 
@@ -154,7 +296,7 @@ function renderEventPins() {
   g.clearLayers();
   ctx.eventMarkers.clear();
   const z = map.getZoom();
-  const evs = ctx.events.filter(e => e.lat != null && ctx.inService(e.lat, e.lng));   // 지도에는 월계동 안 행사만
+  const evs = ctx.events.filter(e => e.lat != null && ctx.inService(e.lat, e.lng) && ctx.eventVisible(e));   // 지도에는 월계동 안, 필터에 맞는 행사만
   // 1) 화면 거리 기준으로 묶기 (가까운 일정부터)
   const groups = [];
   for (const ev of evs) {
@@ -196,52 +338,35 @@ function renderEventPins() {
 // 겹친 행사 목록 (아래에서 올라오는 창) → 하나를 고르면 평소 상세 화면
 ctx.openEventList = (ids, title) => {
   ctx.lastList = { ids, title };
+  // 진행 중인 행사 먼저, 그다음 가까운 날짜 순
   const evs = ids.map(id => ctx.events.find(e => e.id === id)).filter(Boolean)
-    .sort((a, b) => (a.start_at || "9999").localeCompare(b.start_at || "9999"));
+    .map(e => ({ e, s: eventState(e) }))
+    .sort((a, b) => a.s.rank - b.s.rank || (a.e.start_at || "9999").localeCompare(b.e.start_at || "9999"));
+  const nowCnt = evs.filter(x => x.s.rank === 0).length;
   const body = openSheet(`
     <h2 style="font-size:18px">${esc(title)}</h2>
-    <p class="small muted" style="margin:0 0 10px">이 자리에 행사가 ${evs.length}개 있어요. 보고 싶은 행사를 고르세요.</p>
-    <div class="list">${evs.map(e => `
-      <a class="item" href="#/event/${e.id}">
+    <p class="small muted" style="margin:0 0 10px">이 자리의 행사 ${evs.length}개${nowCnt ? ` · 지금 진행 중 ${nowCnt}개` : ""}. 보고 싶은 행사를 고르세요.</p>
+    <div class="list">${evs.map(({ e, s }) => `
+      <a class="item" href="#/event/${e.id}">${evBadge(e)}
         <div class="grow">
-          <div class="row wrap" style="gap:6px;margin-bottom:3px"><span class="chip ${e.category}">${esc(e.category_label)}</span>${e.is_favorite ? `<span class="chip" style="color:#e8542f">♥ 내 일정</span>` : ""}</div>
+          <div class="row wrap" style="gap:6px;margin-bottom:3px"><span class="st-chip ${s.cls}">${s.label}</span>${kindTag(e)}${e.source === "tip" ? `<span class="chip">주민 제보</span>` : ""}${e.is_favorite ? `<span class="chip" style="color:#e8542f">♥ 내 일정</span>` : ""}</div>
           <div class="t">${esc(e.title)}</div>
           <div class="m">${esc(eventWhen(e))}${e.place_name ? " · " + esc(e.place_name) : ""}</div>
         </div></a>`).join("")}</div>`);
 };
 
+// 행사 화면에서 즐겨찾기를 바꾸면 지도 핀의 하트도 바로 바꿈
+ctx.setFavorite = (id, on) => {
+  const e = ctx.events.find(x => x.id === id);
+  if (e) { e.is_favorite = on; renderEventPins(); }
+};
+
 async function loadEvents() {
   try {
-    ctx.events = await api("/api/events?when=upcoming");
+    ctx.events = await api("/api/events?when=upcoming&area=1");
   } catch (e) { toast(e.message); return; }
+  renderChips();
   renderEventPins();
-}
-
-async function loadReports() {
-  const g = layerGroups.reports;
-  try {
-    const rows = await api("/api/reports");
-    g.clearLayers();
-    rows.forEach(r => {
-      L.marker([r.lat, r.lng], { icon: L.divIcon({ className: `rp-dot ${r.status}`, html: "<i></i>", iconSize: [14, 14], iconAnchor: [7, 7] }) })
-        .bindPopup(`<b>${esc(r.category_label)}</b><br>${esc(r.summary || "")}<br><span style="color:#667085">${esc(r.status_label)} · ${ago(r.created_at)}</span>`)
-        .addTo(g);
-    });
-  } catch (e) { /* 공개 목록 실패는 조용히 */ }
-}
-
-async function loadHotspots() {
-  const g = layerGroups.hotspots;
-  try {
-    const rows = await api("/api/reports/hotspots");
-    g.clearLayers();
-    rows.forEach(h => {
-      L.circle([h.lat, h.lng], { radius: h.radius_m, color: "#dc2626", weight: 1.5, fillColor: "#dc2626", fillOpacity: 0.14 })
-        .bindPopup(`<b>문제 반복 구간</b><br>신고 ${h.count}건 (미처리 ${h.open}건)<br>주요 유형: ${esc(h.top_label)}`).addTo(g);
-      L.marker([h.lat, h.lng], { icon: L.divIcon({ className: "hs-label", html: `<span>${h.count}건</span>`, iconSize: [0, 0] }), interactive: false }).addTo(g);
-    });
-    if (layerOn.hotspots && !rows.length) toast("아직 신고가 반복되는 구간이 없어요.");
-  } catch (e) { /* 무시 */ }
 }
 
 function drawConstructions(zones) {
@@ -271,12 +396,12 @@ ctx.pollBadge = pollBadge;
 const routes = [
   [/^\/?$|^\/map$/, null, "map"],
   [/^\/news$/, newsView, "news"],
+  [/^\/search$/, newsView, "search"],     // 아래 메뉴의 '검색' — 소식 화면을 검색창에 바로 맞춰 엶
   [/^\/event\/(\d+)$/, eventView, "map"],
   [/^\/route$/, routeView, "route"],
-  [/^\/plan$/, planView, "route"],
   [/^\/path-edit$/, pathView, "route"],
-  [/^\/report$/, reportView, "report"],
-  [/^\/report\/(\d+)$/, reportView, "report"],
+  [/^\/tip$/, tipView, "me"],
+  [/^\/settings$/, meView, "me"],
   [/^\/me$/, meView, "me"],
   [/^\/login$/, meView, "me"],
   [/^\/notifications$/, meView, "me"],
@@ -294,6 +419,8 @@ function parseHash() {
 async function route() {
   const { path, params } = parseHash();
   if (path + params === current) return;
+  ctx.prevHash = ctx.curHash || "";       // 이전 화면 (상세 화면의 뒤로 버튼용)
+  ctx.curHash = location.hash || "#/map";
   current = path + params;
   navSeq++;
   if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; }
@@ -305,7 +432,7 @@ async function route() {
   if (!matched) { location.hash = "#/map"; return; }
   const [re, mod, tab] = matched;
   $$("#tabbar a").forEach(a => a.classList.toggle("on", a.dataset.tab === tab));
-  if (!/^\/event\//.test(path)) closeSheet();
+  closeSheet();
   if (!mod) { ctx.setActiveEvent(null); return; }
   const m = path.match(re);
   const seq = ++navSeq;
@@ -322,6 +449,9 @@ async function route() {
 
 // ------------------------------------------------------------------ 시작
 async function boot() {
+  initPrefs();
+  initSfx();
+  initInstallPrompt();
   initSheet();
   let base;
   try {
@@ -333,11 +463,14 @@ async function boot() {
     return;
   }
   ctx.base = base;
-  ctx.map = createMap("map", base, { padding: [110, 16] });
-  ["events", "reports", "constructions", "hotspots"].forEach(k => { layerGroups[k] = L.layerGroup(); });
+  ctx.map = createMap("map", base, { padding: [170, 16] });
+  ["events", "constructions"].forEach(k => { layerGroups[k] = L.layerGroup(); });
   ctx.map.on("zoomend", renderEventPins);
-  setupLayerChips();
+  renderChips();
   applyLayers();
+  $("#btn-menu").addEventListener("click", openMapMenu);
+  $("#btn-sat").addEventListener("click", () => setSatellite(!layerOn.satellite));
+  if (layerOn.satellite) setSatellite(true);
 
   $("#btn-locate").addEventListener("click", async () => {
     const pos = await ctx.locate();
@@ -347,11 +480,10 @@ async function boot() {
   $("#btn-bell").addEventListener("click", () => { location.hash = auth.loggedIn ? "#/notifications" : "#/login?next=%23%2Fnotifications"; });
 
   window.addEventListener("hashchange", route);
-  auth.onChange(() => { pollBadge(); });
+  auth.onChange(() => { pollBadge(); loadEvents(); });
+  initLivePush({ onNewItems: () => pollBadge() });       // 보내진 공지·알림을 15초 안에 화면 위쪽에 바로 띄움     // 로그인·로그아웃하면 즐겨찾기 하트를 다시 그림
   await route();
   loadEvents();
-  if (layerOn.reports) loadReports();
-  if (layerOn.hotspots) loadHotspots();
   api("/api/map/constructions").then(drawConstructions).catch(() => {});
   refreshMe().then(pollBadge);
   initLiveBoard(ctx);

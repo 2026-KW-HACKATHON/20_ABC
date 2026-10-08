@@ -3,12 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<meta name="theme-color" content="#14233d">
-<meta name="description" content="월계1동 행사 소식, 지름길·배리어프리 길찾기, 사진 신문고">
+<meta name="theme-color" content="#171717">
+<meta name="description" content="월계1동 행사 소식, 지름길·배리어프리 길찾기, 주민 행사 제보">
 <title>월계온</title>
+<script>/* 화면 모드(밝게·어둡게)를 그리기 전에 적용 — 깜빡임 방지 */try{var p=JSON.parse(localStorage.getItem("wolgyeon.prefs")||"{}"),t=p.theme||"system";if(t==="dark"||(t==="system"&&matchMedia("(prefers-color-scheme: dark)").matches))document.documentElement.dataset.theme="dark"}catch(e){}</script>
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" href="/icons/icon-192.png">
-<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap">
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
@@ -17,23 +19,32 @@
 <body>
 <div id="map" aria-label="월계동 지도"></div>
 
-<!-- 지도 위 상단 -->
-<header class="mapbar" id="mapbar">
-  <div class="brand">
-    <span class="brand-mark" aria-hidden="true"></span>
-    <div>
-      <strong>월계온</strong>
-      <span>월계1동 생활 지도</span>
-    </div>
+<!-- 지도 위 상단: 검색창 + 분류 필터 + 범례 -->
+<header class="topbar" id="topbar">
+  <div class="searchbar">
+    <button class="sb-btn" id="btn-menu" type="button" aria-label="지도 설정과 행사 필터">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <a class="sb-input" href="#/search">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      <span>행사 검색 · 아이, 음악, 무료…</span>
+    </a>
+    <button class="sb-btn bell" id="btn-bell" type="button" aria-label="알림">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>
+      <span class="badge" id="bell-badge" hidden></span>
+    </button>
   </div>
-  <button class="icon-btn bell" id="btn-bell" type="button" aria-label="알림">
-    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>
-    <span class="badge" id="bell-badge" hidden></span>
-  </button>
+  <div class="filterbox">
+    <div class="fchips" id="fchips" role="group" aria-label="행사 종류 고르기"></div>
+    <div class="legend" id="legend"></div>
+  </div>
 </header>
-<div class="layer-chips" id="layer-chips" role="group" aria-label="지도에 표시할 정보"></div>
 <aside class="live-board" id="live-board" aria-live="polite" hidden></aside>
 
+<button class="fab sat" id="btn-sat" type="button" aria-label="위성 지도로 보기" aria-pressed="false">
+  <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+  <span id="sat-label">위성</span>
+</button>
 <button class="fab locate" id="btn-locate" type="button" aria-label="내 위치">
   <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
 </button>
@@ -43,7 +54,7 @@
 
 <!-- 아래에서 올라오는 창 -->
 <section class="sheet" id="sheet" aria-hidden="true">
-  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="sheet-grip" id="sheet-grip" aria-hidden="true"></div>
   <button class="sheet-x" id="sheet-x" type="button" aria-label="닫기">
     <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l10 10M13 3L3 13"/></svg>
   </button>
@@ -54,7 +65,7 @@
   <a href="#/map" data-tab="map"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg><span>지도</span></a>
   <a href="#/news" data-tab="news"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg><span>소식</span></a>
   <a href="#/route" data-tab="route"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M8 19h7a3.5 3.5 0 0 0 0-7H9a3.5 3.5 0 0 1 0-7h7"/></svg><span>길찾기</span></a>
-  <a href="#/report" data-tab="report"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span>신문고</span></a>
+  <a href="#/search" data-tab="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>검색</span></a>
   <a href="#/me" data-tab="me"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg><span>MY</span></a>
 </nav>
 

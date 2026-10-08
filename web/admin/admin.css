@@ -49,3 +49,14 @@ pre.log { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 10p
   .split { grid-template-columns: 1fr; }
   .adm-main { padding: 16px; }
 }
+
+.ai-filled { background: #fff8db !important; border-color: #e6c200 !important; }
+.danger-zone { border-color: #f3c2c9 !important; }
+.danger-btn { background: #d92d45; border-color: #d92d45; color: #fff; }
+
+.rowc { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
+.rowc .ck { margin: 0 0 0 12px; width: 17px; flex: none; }
+.rowc .rowi { border-bottom: 0; }
+.bulkbar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: #fafbfc; font-size: 13px; position: sticky; top: 0; z-index: 2; }
+.bulkbar label { display: inline-flex; gap: 6px; align-items: center; }
+.adm-nav .logo .brand-mark { width: 34px; height: 34px; border-radius: 9px; flex: none; }

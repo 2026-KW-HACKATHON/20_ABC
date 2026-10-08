@@ -1,0 +1,10 @@
+버튼 효과음 출처
+
+Kenney "Interface Sounds" (1.0) — Created/distributed by Kenney (www.kenney.nl)
+License: Creative Commons Zero (CC0) — http://creativecommons.org/publicdomain/zero/1.0/
+"This content is free to use in personal, educational and commercial projects."
+받은 곳: https://github.com/Calinou/kenney-interface-sounds (원본: https://kenney.nl/assets/interface-sounds)
+
+tap.wav    ← select_001.wav  (일반 버튼·링크)
+toggle.wav ← toggle_002.wav  (켜고 끄는 버튼·즐겨찾기·필터)
+back.wav   ← back_001.wav    (뒤로 가기)

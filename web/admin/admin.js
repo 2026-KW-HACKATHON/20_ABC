@@ -10,7 +10,7 @@ let tab = "dash";
 const maps = [];       // 화면 전환 시 정리할 지도
 
 const TABS = [
-  ["dash", "대시보드"], ["events", "행사 승인"], ["reports", "신문고"], ["paths", "길 제보"],
+  ["dash", "대시보드"], ["events", "행사 승인"], ["paths", "길 제보"],
   ["cons", "공사 구간"], ["data", "지도 데이터"], ["users", "사용자"],
 ];
 
@@ -61,7 +61,7 @@ async function refreshSummary() {
   summary = await api("/api/admin/summary");
   const nav = root.querySelector(".adm-nav");
   if (!nav) return;
-  const counts = { events: summary.pending_events, reports: summary.open_reports, paths: summary.pending_paths };
+  const counts = { events: summary.pending_events, paths: summary.pending_paths };
   nav.querySelectorAll("[data-tab]").forEach(b => {
     const c = counts[b.dataset.tab];
     b.querySelector(".cnt")?.remove();
@@ -72,7 +72,7 @@ async function refreshSummary() {
 function shell() {
   root.innerHTML = `<div class="adm">
     <nav class="adm-nav" aria-label="관리 메뉴">
-      <div class="logo"><span class="brand-mark"></span><div><b>월계온</b><small>관리자</small></div></div>
+      <div class="logo"><img class="brand-mark" src="/icons/icon-192.png" alt=""><div><b>월계온</b><small>관리자</small></div></div>
       ${TABS.map(([k, l]) => `<button type="button" data-tab="${k}" ${tab === k ? 'aria-current="page"' : ""}><span>${l}</span></button>`).join("")}
       <div class="foot"><span>${esc(auth.user?.nickname || "")} (@${esc(auth.user?.username || "")})</span><a href="/">앱 열기</a><button type="button" class="btn ghost" id="lo" style="justify-content:flex-start;min-height:0">로그아웃</button></div>
     </nav>
@@ -89,7 +89,7 @@ async function show() {
   main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
   try {
     await refreshSummary();
-    await ({ dash, events, reports, paths, cons, data, users }[tab] || dash)(main);
+    await ({ dash, events, paths, cons, data, users }[tab] || dash)(main);
   } catch (e) {
     if (e.status === 401 || e.status === 403) return loginView(e.message);
     main.innerHTML = `<div class="warn">${esc(e.message)}</div>`;
@@ -102,13 +102,23 @@ async function dash(main) {
   main.innerHTML = `<h1>대시보드</h1><p class="lead">확인할 일을 한눈에 봅니다.</p>
     <div class="stats">
       <div class="stat"><div class="k">승인 대기 행사</div><div class="v">${s.pending_events}</div></div>
-      <div class="stat"><div class="k">처리할 신고</div><div class="v">${s.open_reports}</div></div>
+      <div class="stat"><div class="k">주민 행사 제보 대기</div><div class="v">${s.pending_tips}</div></div>
       <div class="stat"><div class="k">검토할 길 제보</div><div class="v">${s.pending_paths}</div></div>
       <div class="stat"><div class="k">공개 중인 행사</div><div class="v">${s.approved_events}</div></div>
       <div class="stat"><div class="k">가입자</div><div class="v">${s.users}</div></div>
     </div>
     <div class="stack">
-      ${s.ai_enabled ? `<div class="okbox">AI 사진 분류가 켜져 있습니다: ${esc(s.ai_label)}</div>` : `<div class="warn">AI 사진 분류가 꺼져 있습니다. 서버 환경변수 <b>GEMINI_API_KEY</b>(무료) 또는 <b>ANTHROPIC_API_KEY</b>를 설정하면 켜집니다. 지금은 신고자가 유형을 직접 고릅니다.</div>`}
+      ${s.pending_events ? `<div class="panel"><div class="panel-h"><h2>승인 대기 행사 한 번에 공개</h2></div>
+        <div class="panel-b"><p class="note" style="margin:0">대기 중인 행사 <b>${s.pending_events}</b>건을 한꺼번에 승인합니다. 장소 이름으로 위치를 먼저 찾아 넣고, 월계동 안 행사는 지도·달력에, 나머지는 앱 검색에 나옵니다. 하나씩 확인하려면 '행사 승인' 메뉴를 쓰세요.</p>
+        <div class="row wrap" style="margin-top:10px;gap:8px"><select class="input" id="ap-area" style="width:auto"><option value="all">대기 행사 전체</option><option value="in">월계동 안 행사만</option></select>
+          <button class="btn sm blue" id="ap-go" type="button">한 번에 승인</button></div><div id="ap-res"></div></div></div>` : ""}
+      <div class="panel"><div class="panel-h"><h2>모두에게 알림 보내기</h2></div>
+        <div class="panel-b" id="bc-box"><span class="spinner"></span></div></div>
+      <div class="panel"><div class="panel-h"><h2>안드로이드 앱 파일 (APK)</h2></div>
+        <div class="panel-b"><p class="note" style="margin:0">여기에 APK를 올리면, 웹으로 들어온 안드로이드·PC 사용자에게 <b>앱 내려받기 안내</b>가 뜹니다. 없으면 '홈 화면에 설치' 안내가 대신 뜹니다.</p>
+        <div id="apk-st" class="note" style="margin-top:8px"></div>
+        <div class="row" style="margin-top:8px;gap:8px"><input type="file" id="apk-file" accept=".apk"><button class="btn sm primary" id="apk-up" type="button">올리기</button><button class="btn sm ghost danger" id="apk-del" type="button">내리기</button></div></div></div>
+      ${s.ai_enabled ? `<div class="okbox">AI가 켜져 있습니다 (${esc(s.ai_label)}): 주민 제보 포스터 읽기, 광운대 공지·구청 PDF 행사 추출에 쓰입니다.</div>` : `<div class="warn">AI가 꺼져 있습니다. 서버 환경변수 <b>GEMINI_API_KEY</b>(무료)를 설정하면 포스터 자동 읽기와 구청 PDF 행사 추출이 켜집니다.</div>`}
       ${s.seoul_sample_key ? `<div class="warn">서울시 문화행사 API가 샘플 키로 동작 중이라 5건만 받아옵니다. 서울 열린데이터광장에서 인증키를 받아 <b>SEOUL_API_KEY</b>에 넣어주세요.</div>` : ""}
       <div class="panel"><div class="panel-h"><h2>행사 자동 수집</h2><button class="btn sm primary" id="collect" type="button">지금 수집</button></div>
         <div class="panel-b"><p class="note" style="margin:0">서울시 문화행사(노원구·월계1동 반경)와 광운대 공지사항에서 행사를 모아 승인 대기열에 넣습니다. 서버가 켜져 있으면 몇 시간마다 자동으로 실행됩니다.</p>
@@ -116,11 +126,67 @@ async function dash(main) {
         <table class="tbl"><thead><tr><th>출처</th><th>실행 시각</th><th>찾음</th><th>새로 추가</th><th>오류</th></tr></thead><tbody>
         ${s.collect_logs.length ? s.collect_logs.map(l => `<tr><td>${{ seoul: "서울시", kw: "광운대" }[l.source] || l.source}</td><td>${fmtDate(l.at)}</td><td>${l.found}</td><td>${l.added}</td><td class="small" style="color:#dc2626">${esc(l.error || "")}</td></tr>`).join("") : `<tr><td colspan="5" class="muted">아직 수집 기록이 없습니다.</td></tr>`}
         </tbody></table></div></div>
+      ${s.ai_enabled ? `<div class="panel"><div class="panel-h"><h2>AI로 행사 빈칸 채우기</h2><select class="input" id="aifill-st" style="width:auto"><option value="pending">승인 대기</option><option value="approved">공개 중</option><option value="all">전체</option></select><button class="btn sm primary" id="aifill" type="button">실행</button></div>
+        <div class="panel-b"><p class="note" style="margin:0">소개·끝나는 날·장소·주최·요금이 비어 있는 행사를 골라, 원문 링크를 읽고 빈칸만 채웁니다(한 번에 20개). 원문에 없는 날짜·장소는 채우지 않고, 원문이 없으면 소개만 정리합니다. 새로 수집된 행사는 자동으로 채워집니다.</p><div id="aifill-job"></div></div></div>` : ""}
+      <div class="panel"><div class="panel-h"><h2>행사 위치 찾기 · 검색 키워드</h2></div>
+        <div class="panel-b"><p class="note" style="margin:0">지도·달력에는 <b>월계동 안</b> 행사만 나오고, 밖이거나 위치가 없는 행사는 앱의 <b>검색</b>에서만 보입니다. 위치 없는 행사 <b>${s.no_location}</b>건 · 검색 키워드가 붙은 행사 <b>${s.tagged_events}</b>건</p>
+        <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm primary" id="loc-go" type="button">장소 이름으로 위치 찾기</button><span class="note">'월계도서관 4층' → 월계문화정보도서관처럼 지도에 이름이 있는 곳을 찾아 위치를 넣습니다.</span></div>
+        <div id="loc-res"></div>
+        ${s.ai_enabled ? `<div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" id="tag-go" type="button">AI 검색 키워드 만들기</button><span class="note">행사마다 '가족, 야외, 그림책'처럼 이름에 없는 연관 키워드를 붙여 검색이 더 잘 되게 합니다 (한 번에 120개).</span></div><div id="tag-job"></div>` : `<p class="note">AI 키가 없어도 연관어 사전으로 검색은 동작합니다.</p>`}</div></div>
       <div class="panel"><div class="panel-h"><h2>구청 행사 자료 올리기</h2></div>
         <div class="panel-b"><p class="note" style="margin:0">노원구청 '주요행사계획' PDF를 올리면 AI가 주민 대상 행사를 뽑아 <b>승인 대기</b>로 넣습니다 (1~3분). 정리된 JSON 파일은 바로 <b>승인</b>됩니다. 이미 등록된 행사는 다시 넣지 않습니다.</p>
-        <div class="row" style="margin-top:8px"><input type="file" id="off-file" accept=".pdf,.json,application/pdf,application/json"><button class="btn sm primary" id="off-up" type="button">올리기</button></div><div id="off-res"></div></div></div>
+        <div class="row" style="margin-top:8px"><input type="file" id="off-file" accept=".pdf,.json,application/pdf,application/json"><button class="btn sm primary" id="off-up" type="button">올리기</button></div><div id="off-res"></div>
+        <div class="row" style="margin-top:10px;gap:8px"><button class="btn sm" id="off-re" type="button">노원구 9월 자료 다시 넣기</button><span class="note">초기화한 뒤 앱에 함께 들어 있는 구청 자료(80건)를 다시 등록합니다. 이미 있는 행사는 건너뜁니다.</span></div></div></div>
+      <div class="panel danger-zone"><div class="panel-h"><h2>행사 초기화</h2></div>
+        <div class="panel-b"><p class="note" style="margin:0">고른 범위의 행사를 한꺼번에 지웁니다. 그 행사의 즐겨찾기·후기(사진·영상 포함)·제보 포스터·알림도 함께 지워지며 <b>되돌릴 수 없습니다.</b> 사용자 계정, 길 제보, 공사 구간, 지도 데이터는 그대로입니다.</p>
+        <div class="row wrap" style="margin-top:10px;gap:8px">
+          <select class="input" id="rs-scope" style="width:auto"><option value="all">모든 행사</option><option value="collected">자동 수집·구청 자료만 (직접 등록·주민 제보는 남김)</option><option value="pending">승인 대기만</option></select>
+          <input class="input" id="rs-confirm" placeholder="'초기화'라고 입력" style="width:170px">
+          <button class="btn sm danger-btn" id="rs-go" type="button">초기화</button></div><div id="rs-res"></div></div></div>
     </div>`;
   main.querySelector("#collect").addEventListener("click", () => runJob("/api/admin/collect", "collect", main.querySelector("#job"), () => show()));
+  main.querySelector("#aifill")?.addEventListener("click", () => runJob(`/api/admin/ai-fill?status=${main.querySelector("#aifill-st").value}`, "aifill", main.querySelector("#aifill-job")));
+  broadcastPanel(main.querySelector("#bc-box"));
+  const apkSt = async () => {
+    try { const r = await api("/api/app/apk"); main.querySelector("#apk-st").innerHTML = r.available ? `올라와 있음: <b>${r.size_mb}MB</b> · ${new Date(r.updated * 1000).toLocaleString("ko-KR")} · <a href="${r.url}">내려받기 확인</a>` : "아직 올린 APK가 없습니다."; } catch (_) {}
+  };
+  apkSt();
+  main.querySelector("#apk-up").addEventListener("click", async () => {
+    const f = main.querySelector("#apk-file").files[0];
+    if (!f) return toast("APK 파일을 골라주세요.");
+    const fd = new FormData(); fd.append("file", f);
+    main.querySelector("#apk-st").innerHTML = `<span class="spinner"></span> 올리는 중…`;
+    try { const r = await api("/api/admin/app/apk", { method: "POST", form: fd }); toast(`APK를 올렸습니다 (${r.size_mb}MB).`); } catch (ex) { toast(ex.message); }
+    apkSt();
+  });
+  main.querySelector("#apk-del").addEventListener("click", async () => {
+    if (!confirm("올린 APK를 내릴까요? 웹 사용자에게 내려받기 안내가 더 이상 뜨지 않습니다.")) return;
+    try { await api("/api/admin/app/apk", { method: "DELETE" }); toast("APK를 내렸습니다."); } catch (ex) { toast(ex.message); }
+    apkSt();
+  });
+  main.querySelector("#ap-go")?.addEventListener("click", () => approveAll(main.querySelector("#ap-area").value));
+  main.querySelector("#loc-go").addEventListener("click", async () => {
+    try {
+      const r = await api("/api/admin/events/locate", { method: "POST" });
+      main.querySelector("#loc-res").innerHTML = `<div class="okbox">위치 없는 행사 ${r.checked}건 중 ${r.found}건의 위치를 찾았습니다 (월계동 안 ${r.inside}건).</div>`;
+      summary = await api("/api/admin/summary");
+    } catch (ex) { toast(ex.message); }
+  });
+  main.querySelector("#tag-go")?.addEventListener("click", () => runJob("/api/admin/search-tags", "tags", main.querySelector("#tag-job")));
+  main.querySelector("#off-re").addEventListener("click", async () => {
+    try { const r = await api("/api/admin/official/reimport", { method: "POST" }); toast(`구청 자료 ${r.added}건을 다시 넣었습니다.`); summary = await api("/api/admin/summary"); }
+    catch (ex) { toast(ex.message); }
+  });
+  main.querySelector("#rs-go").addEventListener("click", async () => {
+    const scope = main.querySelector("#rs-scope").value, confirmText = main.querySelector("#rs-confirm").value.trim();
+    if (confirmText !== "초기화") return toast("확인 칸에 '초기화'라고 적어주세요.");
+    if (!confirm("정말 지울까요? 되돌릴 수 없습니다.")) return;
+    try {
+      const r = await api("/api/admin/events/reset", { method: "POST", body: { scope, confirm: confirmText } });
+      main.querySelector("#rs-res").innerHTML = `<div class="okbox">${esc(r.scope)} ${r.deleted}건을 지웠습니다 (후기 ${r.reviews}개 포함). 다시 채우려면 위의 "지금 수집"이나 구청 자료 올리기를 쓰세요.</div>`;
+      main.querySelector("#rs-confirm").value = "";
+    } catch (ex) { toast(ex.message); }
+  });
   main.querySelector("#off-up").addEventListener("click", async () => {
     const f = main.querySelector("#off-file").files[0], out = main.querySelector("#off-res");
     if (!f) return toast("파일을 골라주세요.");
@@ -143,6 +209,63 @@ async function dash(main) {
   });
 }
 
+// ------------------------------------------------------------------ 모두에게 알림
+let bcMode = "event";
+async function broadcastPanel(box) {
+  let meta;
+  try { meta = await api("/api/admin/broadcast/meta"); } catch (ex) { box.innerHTML = `<div class="warn">${esc(ex.message)}</div>`; return; }
+  const evOpt = meta.events.map(e => `<option value="${e.id}">${e.in_area ? "" : "[월계동 밖] "}${fmtDate(e.start_at)} · ${esc(e.title)}</option>`).join("");
+  box.innerHTML = `<p class="note" style="margin:0 0 10px">가입자 <b>${meta.users}</b>명의 앱 알림함에 들어가고, 안드로이드 앱을 설치한 휴대폰에는 15분 안에 알림으로 뜹니다(로그인 안 한 앱 사용자 포함 — 즐겨찾기 알림 제외).</p>
+    <div class="seg" id="bc-mode" style="max-width:520px">${[["favorites", "즐겨찾기 행사 알림"], ["event", "행사 추천"], ["custom", "직접 쓰기"]].map(([k, l]) => `<button type="button" data-m="${k}" aria-pressed="${bcMode === k}">${l}</button>`).join("")}</div>
+    <div id="bc-form" class="stack" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:10px;gap:8px"><button class="btn sm blue" id="bc-send" type="button">보내기</button><span class="note" id="bc-res"></span></div>
+    ${meta.recent.length ? `<h3 style="font-size:13px;margin:14px 0 6px">최근 보낸 알림</h3><table class="tbl"><tbody>${meta.recent.map(b => `<tr><td class="small" style="white-space:nowrap">${fmtDate(b.at)}</td><td>${{ event: "추천", custom: "직접" }[b.kind] || b.kind}</td><td><b>${esc(b.title)}</b>${b.body ? `<div class="small muted">${esc(b.body)}</div>` : ""}</td><td class="small">${b.sent}명</td></tr>`).join("")}</tbody></table>` : ""}`;
+  const form = box.querySelector("#bc-form");
+  const draw = () => {
+    if (bcMode === "favorites") {
+      form.innerHTML = `<div class="grid2"><label class="field">몇 시간 안에 시작하는 행사<input class="input" id="bc-h" type="number" min="1" max="72" value="3"></label><span></span></div>
+        <label class="field">문구 ({title} = 행사 이름, {n} = 남은 시간)<input class="input" id="bc-tpl" value="즐겨찾기한 '{title}' 행사가 {n}시간 뒤에 시작합니다"></label>
+        <p class="note" style="margin:0">그 시간 안에 시작하는 행사를 즐겨찾기한 사람에게만 보냅니다.</p>`;
+    } else if (bcMode === "event") {
+      form.innerHTML = meta.events.length ? `<label class="field">추천할 행사 (30일 안)<select class="input" id="bc-ev">${evOpt}</select></label>
+        <label class="field">제목<input class="input" id="bc-t"></label><label class="field">내용<input class="input" id="bc-b"></label>
+        <p class="note" style="margin:0">알림을 누르면 그 행사 화면이 열립니다. 문구는 고쳐서 보낼 수 있어요.</p>` : `<div class="warn">30일 안에 열리는 공개 행사가 없습니다.</div>`;
+      const fill = () => { const e = meta.events.find(x => x.id == form.querySelector("#bc-ev").value); if (e) { form.querySelector("#bc-t").value = e.msg_title; form.querySelector("#bc-b").value = e.msg_body; } };
+      form.querySelector("#bc-ev")?.addEventListener("change", fill); if (meta.events.length) fill();
+    } else {
+      form.innerHTML = `<label class="field">제목<input class="input" id="bc-t" maxlength="200" placeholder="예: 이번 주말 월계동 축제 안내"></label>
+        <label class="field">내용<textarea class="input" id="bc-b" rows="3" maxlength="1000"></textarea></label>
+        <label class="field">누르면 열 화면 (선택)<input class="input" id="bc-l" placeholder="#/news 또는 #/event/12"></label>`;
+    }
+  };
+  draw();
+  box.querySelectorAll("#bc-mode [data-m]").forEach(b => b.addEventListener("click", () => {
+    bcMode = b.dataset.m; box.querySelectorAll("#bc-mode [data-m]").forEach(x => x.setAttribute("aria-pressed", x === b)); draw();
+  }));
+  box.querySelector("#bc-send").addEventListener("click", async () => {
+    const v = id => form.querySelector(id)?.value?.trim() || "";
+    const body = { mode: bcMode };
+    if (bcMode === "favorites") Object.assign(body, { hours: +v("#bc-h") || 3, template: v("#bc-tpl") });
+    else if (bcMode === "event") Object.assign(body, { event_id: +v("#bc-ev"), title: v("#bc-t"), body: v("#bc-b") });
+    else Object.assign(body, { title: v("#bc-t"), body: v("#bc-b"), link: v("#bc-l") });
+    if (bcMode !== "favorites" && !body.title) return toast("제목을 입력해주세요.");
+    if (!confirm(bcMode === "favorites" ? "즐겨찾기한 사람들에게 알림을 보낼까요?" : `모든 사용자에게 '${body.title}' 알림을 보낼까요?`)) return;
+    try { const r = await api("/api/admin/broadcast", { method: "POST", body }); toast(r.message, 4000); broadcastPanel(box); }
+    catch (ex) { toast(ex.message); }
+  });
+}
+
+async function approveAll(area) {
+  const n = summary.pending_events;
+  if (!confirm(area === "in" ? "월계동 안의 승인 대기 행사를 모두 공개할까요?" : `승인 대기 행사 ${n}건을 모두 공개할까요?`)) return;
+  try {
+    const r = await api("/api/admin/events/approve-pending", { method: "POST", body: { area } });
+    toast(`${r.approved}건을 승인했습니다 (월계동 안 ${r.inside}건 · 나머지는 앱 검색에서만 보여요).`, 4500);
+    await refreshSummary();
+    show();
+  } catch (ex) { toast(ex.message); }
+}
+
 async function runJob(url, name, el, done) {
   try { await api(url, { method: "POST" }); } catch (e) { toast(e.message); if (e.status !== 409) return; }
   el.innerHTML = `<div class="row"><span class="spinner"></span><span>실행 중… 창을 닫아도 서버에서 계속 진행됩니다.</span></div>`;
@@ -157,22 +280,40 @@ async function runJob(url, name, el, done) {
 }
 
 // ------------------------------------------------------------------ 행사
-let evFilter = "pending";
+let evFilter = "pending", evArea = "all";
+const AREA_TXT = e => e.in_area ? `<span class="chip resolved">월계동 안</span>` : e.lat == null ? `<span class="chip pending">위치 없음 · 검색만</span>` : `<span class="chip pending">월계동 밖 · 검색만</span>`;
 async function events(main) {
   const cats = summary.meta.event_categories;
-  const rows = await api(`/api/admin/events?status=${evFilter}`);
-  main.innerHTML = `<h1>행사 승인</h1><p class="lead">자동 수집된 행사를 확인해 승인하거나, 직접 등록합니다. 승인된 행사만 앱에 보이고, 해당 분류 알림을 켠 주민에게 알림이 갑니다.</p>
+  const rows = await api((evFilter === "tips" ? "/api/admin/events?status=pending&source=tip" : `/api/admin/events?status=${evFilter}`) + `&area=${evArea}`);
+  main.innerHTML = `<h1>행사 승인</h1><p class="lead">자동 수집된 행사와 주민이 제보한 행사를 확인해 승인하거나, 직접 등록합니다. 승인된 행사만 앱에 보이고, 해당 분류 알림을 켠 주민에게 알림이 갑니다.</p>
     <div class="split">
       <div class="panel"><div class="panel-h">
-        <select class="input" id="ev-f" style="width:auto">${[["pending", "승인 대기"], ["approved", "승인됨"], ["rejected", "반려"], ["all", "전체"]].map(([k, l]) => `<option value="${k}" ${evFilter === k ? "selected" : ""}>${l}</option>`).join("")}</select>
-        <span class="grow"></span><button class="btn sm primary" id="ev-new" type="button">새 행사 등록</button></div>
-        <div class="rows">${rows.length ? rows.map(e => `<button class="rowi" type="button" data-id="${e.id}"><div class="grow">
-          <div class="row wrap" style="gap:6px"><span class="chip ${e.category}">${esc(e.category_label)}</span><span class="chip ${e.status === "approved" ? "resolved" : e.status}">${{ pending: "대기", approved: "승인", rejected: "반려" }[e.status]}</span><span class="small muted">${{ seoul: "서울시", kw: "광운대", manual: "직접", nowon: "노원구청" }[e.source] || e.source}</span></div>
-          <div class="t">${esc(e.title)}</div><div class="m">${e.start_at ? fmtDate(e.start_at) : "날짜 확인 필요"} · ${esc(e.place_name || "장소 확인 필요")}</div></div></button>`).join("") : `<div class="empty">해당하는 행사가 없습니다.</div>`}</div>
+        <select class="input" id="ev-f" style="width:auto">${[["pending", "승인 대기"], ["tips", "주민 제보 대기"], ["approved", "승인됨"], ["rejected", "반려"], ["all", "전체"]].map(([k, l]) => `<option value="${k}" ${evFilter === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+        <select class="input" id="ev-area" style="width:auto">${[["all", "모든 지역"], ["in", "월계동 안"], ["out", "월계동 밖·위치 없음"]].map(([k, l]) => `<option value="${k}" ${evArea === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+        <span class="grow"></span>${evFilter === "pending" && evArea !== "out" && rows.length ? `<button class="btn sm blue" id="ev-all" type="button">대기 ${evArea === "in" ? "(월계동 안) " : ""}전체 승인</button>` : ""}<button class="btn sm primary" id="ev-new" type="button">새 행사 등록</button></div>
+        ${rows.length ? `<div class="bulkbar"><label><input type="checkbox" id="ck-all"> 전체 선택</label><span class="grow note" id="ck-n">0개 선택</span>
+          <button class="btn sm blue" type="button" data-bulk="approved">선택 승인</button><button class="btn sm" type="button" data-bulk="rejected">선택 반려</button></div>` : ""}
+        <div class="rows">${rows.length ? rows.map(e => `<div class="rowc"><input type="checkbox" class="ck" value="${e.id}" aria-label="선택"><button class="rowi" type="button" data-id="${e.id}"><div class="grow">
+          <div class="row wrap" style="gap:6px"><span class="chip ${e.category}">${esc(e.category_label)}</span><span class="chip ${e.status === "approved" ? "resolved" : e.status}">${{ pending: "대기", approved: "승인", rejected: "반려" }[e.status]}</span>${AREA_TXT(e)}<span class="small muted">${{ seoul: "서울시", kw: "광운대", manual: "직접", nowon: "노원구청", tip: "주민 제보" }[e.source] || e.source}</span></div>
+          <div class="t">${esc(e.title)}</div><div class="m">${e.start_at ? fmtDate(e.start_at) : "날짜 확인 필요"} · ${esc(e.place_name || "장소 확인 필요")}</div></div></button></div>`).join("") : `<div class="empty">해당하는 행사가 없습니다.</div>`}</div>
       </div>
       <div class="panel" id="ev-edit"><div class="empty">왼쪽에서 행사를 고르거나 새로 등록하세요.</div></div>
     </div>`;
   main.querySelector("#ev-f").addEventListener("change", e => { evFilter = e.target.value; show(); });
+  main.querySelector("#ev-all")?.addEventListener("click", () => approveAll(evArea === "in" ? "in" : "all"));
+  main.querySelector("#ev-area").addEventListener("change", e => { evArea = e.target.value; show(); });
+  const cks = [...main.querySelectorAll(".ck")], nEl = main.querySelector("#ck-n");
+  const upd = () => { if (nEl) nEl.textContent = `${cks.filter(c => c.checked).length}개 선택`; };
+  cks.forEach(c => c.addEventListener("change", upd));
+  main.querySelector("#ck-all")?.addEventListener("change", e => { cks.forEach(c => { c.checked = e.target.checked; }); upd(); });
+  main.querySelectorAll("[data-bulk]").forEach(b => b.addEventListener("click", async () => {
+    const ids = cks.filter(c => c.checked).map(c => +c.value);
+    if (!ids.length) return toast("행사를 먼저 골라주세요.");
+    const st = b.dataset.bulk;
+    if (!confirm(`${ids.length}개 행사를 ${st === "approved" ? "승인(공개)" : "반려"}할까요?`)) return;
+    try { const r = await api("/api/admin/events/bulk", { method: "POST", body: { ids, status: st } }); toast(`${r.changed}개를 ${st === "approved" ? "승인" : "반려"}했습니다.`); summary = await api("/api/admin/summary"); show(); }
+    catch (ex) { toast(ex.message); }
+  }));
   main.querySelector("#ev-new").addEventListener("click", () => evForm(main, null, cats));
   main.querySelectorAll(".rowi").forEach(b => b.addEventListener("click", () => {
     main.querySelectorAll(".rowi").forEach(x => x.classList.toggle("sel", x === b));
@@ -187,6 +328,8 @@ function evForm(main, e, cats) {
   box.innerHTML = `<div class="panel-h"><h2>${e ? "행사 편집" : "새 행사 등록"}</h2>${/^https?:\/\//i.test(e?.url || "") ? `<a class="btn sm" href="${esc(e.url)}" target="_blank" rel="noopener">원문</a>` : ""}</div>
     <div class="panel-b">
       ${e?.ai_note ? `<div class="note">${esc(e.ai_note)}</div>` : ""}
+      ${e?.source === "tip" ? `<div class="okbox">주민이 제보한 행사입니다. 승인하거나 반려하면 제보자에게 앱 알림이 갑니다.</div>` : ""}
+      ${e?.poster_admin_url ? `<img src="${esc(e.poster_admin_url)}" alt="제보 포스터" style="width:100%;max-height:420px;object-fit:contain;background:#f2f4f7;border-radius:12px">` : ""}
       <label class="field">행사 이름<input class="input" id="f-title" value="${esc(v.title)}"></label>
       <div class="grid2">
         <label class="field">분류<select class="input" id="f-cat">${Object.entries(cats).map(([k, l]) => `<option value="${k}" ${v.category === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
@@ -197,7 +340,7 @@ function evForm(main, e, cats) {
       ${!v.start_at ? `<div class="warn">시작 날짜가 비어 있습니다. 원문을 확인해 채워주세요.${e?.source === "kw" ? ` <button class="btn sm" id="f-reread" type="button">공지에서 다시 읽기</button>` : ""}</div>` : ""}
       <label class="field">일시 설명 (선택)<input class="input" id="f-tt" value="${esc(v.time_text)}" placeholder="예: 매주 토요일 14:00~16:00"></label>
       <label class="field">장소 이름<input class="input" id="f-place" value="${esc(v.place_name)}"></label>
-      <div class="field">지도 위치 <span class="note">(지도를 눌러 정확한 위치를 찍어주세요)</span><div class="pickmap" id="f-map"></div><span class="note" id="f-ll">${v.lat != null ? `${v.lat}, ${v.lng}` : "위치 없음 — 승인하려면 필요합니다"}</span></div>
+      <div class="field">지도 위치 <span class="note">(지도를 눌러 정확한 위치를 찍어주세요)</span><div class="pickmap" id="f-map"></div><span class="note" id="f-ll">${v.lat != null ? `${v.lat}, ${v.lng}${e && !e.in_area ? " (월계동 밖 — 앱에서는 검색으로만 보입니다)" : ""}` : "위치 없음 — 승인하면 지도·달력에는 안 나오고 검색에서만 보입니다"}</span></div>
       <label class="field">소개<textarea class="input" id="f-desc" rows="5">${esc(v.description)}</textarea></label>
       <div class="grid2">
         <label class="field">요금<input class="input" id="f-fee" value="${esc(v.fee)}"></label>
@@ -205,6 +348,7 @@ function evForm(main, e, cats) {
         <label class="field">원문 링크<input class="input" id="f-url" value="${esc(v.url)}"></label>
         <label class="field">이미지 주소<input class="input" id="f-img" value="${esc(v.image_url)}"></label>
       </div>
+      ${e && summary.ai_enabled ? `<div class="row" style="gap:8px"><button class="btn" id="f-ai" type="button">✦ AI로 빈칸 채우기</button><span class="note">원문 링크를 읽고 비어 있는 칸만 채웁니다. 확인 후 저장하세요.</span></div>` : ""}
       <div class="row wrap">
         ${e ? `<button class="btn" id="f-save" type="button">저장만</button>` : ""}
         <button class="btn blue" id="f-approve" type="button">${e ? (e.status === "approved" ? "저장 (공개 중)" : "승인하고 공개") : "등록하고 공개"}</button>
@@ -229,6 +373,21 @@ function evForm(main, e, cats) {
       evForm(main, r.event, cats);
     } catch (ex) { toast(ex.message); b.disabled = false; b.textContent = "공지에서 다시 읽기"; }
   });
+  box.querySelector("#f-ai")?.addEventListener("click", async ev2 => {
+    const b = ev2.currentTarget; b.disabled = true; b.textContent = "AI가 읽는 중…";
+    try {
+      const r = await api(`/api/admin/events/${e.id}/ai-fill`, { method: "POST" });
+      const sug = r.suggestions || {};
+      const map = { description: "#f-desc", start_at: "#f-start", end_at: "#f-end", time_text: "#f-tt", place_name: "#f-place", host: "#f-host", fee: "#f-fee" };
+      let n = 0;
+      for (const [k, sel] of Object.entries(map)) {
+        const el = box.querySelector(sel);
+        if (sug[k] && el && !el.value.trim()) { el.value = sug[k]; el.classList.add("ai-filled"); n++; }
+      }
+      toast(n ? `${n}개 칸을 채웠습니다. 노란 칸을 확인하고 저장하세요.` : (r.message || "채울 수 있는 칸을 찾지 못했습니다."));
+    } catch (ex) { toast(ex.message); }
+    b.disabled = false; b.textContent = "✦ AI로 빈칸 채우기";
+  });
   const save = async status => {
     if (!g("#f-title")) return toast("행사 이름을 입력해주세요.");
     if ((status === "approved" || !e) && !g("#f-start") &&
@@ -249,67 +408,6 @@ function evForm(main, e, cats) {
   });
 }
 
-// ------------------------------------------------------------------ 신문고
-let rpFilter = "open";
-async function reports(main) {
-  const rows = await api(`/api/admin/reports?status=${rpFilter}`);
-  const st = summary.meta.report_status, cats = summary.meta.report_categories;
-  main.innerHTML = `<h1>신문고</h1><p class="lead">상태를 바꾸면 신고한 주민에게 앱 알림이 갑니다. 공사 신고는 공사 구간으로 등록해 길찾기에 반영할 수 있습니다.</p>
-    <div class="split">
-      <div class="panel"><div class="panel-h"><select class="input" id="rp-f" style="width:auto">${[["open", "처리할 신고"], ["resolved", "처리 완료"], ["rejected", "반려"], ["all", "전체"]].map(([k, l]) => `<option value="${k}" ${rpFilter === k ? "selected" : ""}>${l}</option>`).join("")}</select>
-        <span class="grow"></span><a class="btn sm" href="#" id="rp-hot">문제 반복 구간 보기</a></div>
-        <div class="rows">${rows.length ? rows.map(r => `<button class="rowi" type="button" data-id="${r.id}"><img src="${r.thumb_url}" alt="" loading="lazy"><div class="grow">
-          <div class="row wrap" style="gap:6px"><span class="chip ${r.status}">${esc(r.status_label)}</span>${r.ai_severity === 3 ? `<span class="chip" style="color:#dc2626">긴급</span>` : ""}<span class="small muted">${ago(r.created_at)}</span></div>
-          <div class="t">${esc(r.category_label)}</div><div class="m">${esc(r.summary || r.description || "")}</div></div></button>`).join("") : `<div class="empty">해당하는 신고가 없습니다.</div>`}</div>
-      </div>
-      <div class="panel" id="rp-edit"><div class="empty">왼쪽에서 신고를 고르세요.</div></div>
-    </div>`;
-  main.querySelector("#rp-f").addEventListener("change", e => { rpFilter = e.target.value; show(); });
-  main.querySelector("#rp-hot").addEventListener("click", async ev => {
-    ev.preventDefault();
-    const hs = await api("/api/reports/hotspots");
-    const box = main.querySelector("#rp-edit");
-    cleanupMaps();
-    box.innerHTML = `<div class="panel-h"><h2>문제 반복 구간 (반경 40m 안 신고 3건 이상)</h2></div><div class="panel-b"><div class="pickmap" id="hs-map" style="height:420px"></div>
-      <table class="tbl"><thead><tr><th>신고 수</th><th>미처리</th><th>주요 유형</th><th>최근</th></tr></thead><tbody>${hs.length ? hs.map(h => `<tr><td>${h.count}</td><td>${h.open}</td><td>${esc(h.top_label)}</td><td>${ago(h.last)}</td></tr>`).join("") : `<tr><td colspan="4" class="muted">아직 반복 구간이 없습니다.</td></tr>`}</tbody></table></div>`;
-    const m = createMap(box.querySelector("#hs-map"), base, { attribution: false });
-    maps.push(m);
-    hs.forEach(h => L.circle([h.lat, h.lng], { radius: h.radius_m, color: "#dc2626", fillOpacity: .15 }).bindPopup(`${h.count}건 · ${esc(h.top_label)}`).addTo(m));
-  });
-  main.querySelectorAll(".rowi").forEach(b => b.addEventListener("click", () => {
-    main.querySelectorAll(".rowi").forEach(x => x.classList.toggle("sel", x === b));
-    const r = rows.find(x => x.id == b.dataset.id);
-    cleanupMaps();
-    const box = main.querySelector("#rp-edit");
-    box.innerHTML = `<div class="panel-h"><h2>신고 #${r.id} · ${esc(r.reporter)}</h2><span class="small muted">${fmtDate(r.created_at)}</span></div>
-      <div class="panel-b">
-        <img src="${r.image_url}" alt="신고 사진" style="width:100%;max-height:420px;object-fit:contain;background:#111;border-radius:12px">
-        ${r.ai_category ? `<div class="note">AI 판단: ${esc(cats[r.ai_category] || r.ai_category)} (확신도 ${Math.round(r.ai_confidence * 100)}%, 심각도 ${r.ai_severity}) — ${esc(r.summary)}</div>` : `<div class="note">AI 분류 없이 접수됨</div>`}
-        ${r.description ? `<p style="margin:0">${esc(r.description)}</p>` : ""}
-        <div class="pickmap" id="rp-map" style="height:220px"></div>
-        <div class="grid2">
-          <label class="field">유형<select class="input" id="r-cat">${Object.entries(cats).map(([k, l]) => `<option value="${k}" ${r.category === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-          <label class="field">상태<select class="input" id="r-st">${Object.entries(st).map(([k, l]) => `<option value="${k}" ${r.status === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-        </div>
-        <label class="field">주민에게 보일 메모<textarea class="input" id="r-note" rows="3" placeholder="예: 노원구청 도로과에 전달했습니다.">${esc(r.admin_note || "")}</textarea></label>
-        <div class="row wrap"><button class="btn primary" id="r-save" type="button">저장하고 알림 보내기</button><button class="btn" id="r-cons" type="button">공사 구간으로 등록</button></div>
-      </div>`;
-    const m = createMap(box.querySelector("#rp-map"), base, { attribution: false });
-    maps.push(m);
-    m.setView([r.lat, r.lng], 18, { animate: false });
-    L.marker([r.lat, r.lng], { icon: L.divIcon({ className: `rp-dot ${r.status}`, html: "<i></i>", iconSize: [14, 14], iconAnchor: [7, 7] }) }).addTo(m);
-    box.querySelector("#r-save").addEventListener("click", async () => {
-      try {
-        await api(`/api/admin/reports/${r.id}`, { method: "PATCH", body: { status: box.querySelector("#r-st").value, category: box.querySelector("#r-cat").value, admin_note: box.querySelector("#r-note").value } });
-        toast("저장했습니다."); show();
-      } catch (ex) { toast(ex.message); }
-    });
-    box.querySelector("#r-cons").addEventListener("click", async () => {
-      try { await api(`/api/admin/reports/${r.id}/to-construction`, { method: "POST" }); toast("공사 구간으로 등록했습니다. 공사 구간 메뉴에서 기간을 정해주세요."); show(); } catch (ex) { toast(ex.message); }
-    });
-  }));
-}
-
 // ------------------------------------------------------------------ 길 제보
 let pFilter = "pending";
 const PCOLOR = { add: "#2563eb", gate: "#7c3aed", block: "#dc2626", stairs: "#92400e", steep: "#b45309" };
@@ -320,7 +418,7 @@ async function paths(main) {
       <div class="panel"><div class="panel-h"><select class="input" id="p-f" style="width:auto">${[["pending", "검토 대기"], ["approved", "반영됨"], ["rejected", "반려"], ["all", "전체"]].map(([k, l]) => `<option value="${k}" ${pFilter === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
         <div class="rows">${rows.length ? rows.map(p => `<button class="rowi" type="button" data-id="${p.id}"><div class="grow">
           <div class="row" style="gap:6px"><span class="chip" style="color:${PCOLOR[p.kind]}">${esc(p.kind_label)}</span><span class="small muted">${ago(p.created_at)}</span></div>
-          <div class="m">${esc(p.note || "메모 없음")}${p.open_hours ? ` · 통행 ${esc(p.open_hours)}` : ""}</div></div></button>`).join("") : `<div class="empty">해당하는 제보가 없습니다.</div>`}</div></div>
+          <div class="m">${p.strokes ? "칠한 범위 · " : ""}${esc(p.note || "메모 없음")}${p.open_hours ? ` · 통행 ${esc(p.open_hours)}` : ""}</div></div></button>`).join("") : `<div class="empty">해당하는 제보가 없습니다.</div>`}</div></div>
       <div class="panel" id="p-edit"><div class="panel-b"><div class="pickmap" id="p-map" style="height:520px"></div></div></div>
     </div>`;
   main.querySelector("#p-f").addEventListener("change", e => { pFilter = e.target.value; show(); });
@@ -328,7 +426,10 @@ async function paths(main) {
   maps.push(m);
   const shapes = {};
   rows.forEach(p => {
-    const shape = p.coords.length > 1 ? L.polyline(p.coords, { color: PCOLOR[p.kind], weight: 5, dashArray: "8 6" }) : L.circleMarker(p.coords[0], { radius: 8, color: PCOLOR[p.kind] });
+    // 칠하기 제보(계단·가파른 길)는 굵은 반투명 선으로
+    const shape = p.strokes && p.strokes.length
+      ? L.featureGroup(p.strokes.map(s => L.polyline(s.length > 1 ? s : [s[0], s[0]], { color: PCOLOR[p.kind], weight: 14, opacity: .45, lineCap: "round" })))
+      : p.coords.length > 1 ? L.polyline(p.coords, { color: PCOLOR[p.kind], weight: 5, dashArray: "8 6" }) : L.circleMarker(p.coords[0], { radius: 8, color: PCOLOR[p.kind] });
     shape.addTo(m); shapes[p.id] = shape;
   });
   main.querySelectorAll(".rowi").forEach(b => b.addEventListener("click", () => {
@@ -413,7 +514,7 @@ async function data(main) {
         <div class="panel-b"><p class="note" style="margin:0">서버에서 Overpass에 접속이 안 될 때, overpass-turbo에서 내보낸 GeoJSON을 올립니다. 월계1동 행정경계가 꼭 있어야 하고, 월계2·3동 경계가 있으면 지도 범위가 월계동 전체로 잡힙니다.</p>
         <div class="row"><input type="file" id="osm-file" accept=".geojson,.json,application/json"><button class="btn sm" id="osm-up" type="button">올리기</button></div><div id="up-res"></div></div></div>
       <div class="panel"><div class="panel-h"><h2>경사도 (고도 데이터)</h2><button class="btn sm primary" id="elev" type="button">고도 받기</button></div>
-        <div class="panel-b"><p class="note" style="margin:0">Open-Meteo 고도 API(90m 격자)로 보행로 노드의 고도를 받아 경사도를 계산합니다. 배리어프리 경로가 급경사를 피하게 됩니다. 지형 수준의 경사라 짧은 경사로·턱은 주민 제보로 보완하세요.</p><div id="elev-job"></div></div></div>
+        <div class="panel-b"><p class="note" style="margin:0">키 없이 쓰는 Open-Meteo 고도 API(Copernicus 90m 격자)로 월계동 위 약 1,200곳의 고도를 받아(2~3분) 보행로 경사도를 계산합니다. 지도 데이터를 새로 받은 뒤에는 한 번 더 누르세요. 배리어프리 경로가 급경사를 피하게 됩니다. 지형 수준의 경사라 짧은 경사로·턱은 주민 제보로 보완하세요.</p><div id="elev-job"></div></div></div>
     </div>`;
   main.querySelector("#osm").addEventListener("click", () => runJob("/api/admin/osm/refresh", "osm", main.querySelector("#osm-job")));
   main.querySelector("#elev").addEventListener("click", () => runJob("/api/admin/elevation/refresh", "elevation", main.querySelector("#elev-job")));
