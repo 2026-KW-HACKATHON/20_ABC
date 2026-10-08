@@ -13,7 +13,6 @@ from datetime import datetime  # noqa: E402
 import httpx  # noqa: E402
 
 from app.services import collect, geo  # noqa: E402
-from app.services.cluster import hotspots  # noqa: E402
 
 KW_LIST_HTML = """
 <ul class="board-list">
@@ -97,16 +96,17 @@ def test_ai_request_shape(monkeypatch):
         seen["body"] = json.loads(req.content)
         return hx.Response(200, json={
             "id": "msg_1", "type": "message", "role": "assistant", "model": seen["body"]["model"],
-            "content": [{"type": "tool_use", "id": "tu_1", "name": "report_classification",
-                         "input": {"category": "road_damage", "confidence": 0.92, "summary": "보도블록이 깨져 있음",
-                                   "severity": 2, "privacy": False}}],
+            "content": [{"type": "tool_use", "id": "tu_1", "name": "poster_event",
+                         "input": {"is_event": True, "title": "월계 가을 작은음악회", "category": "culture", "start": "2026-10-10 18:00",
+                                   "end": "", "time_text": "10월 10일(토) 오후 6시", "place": "월계1동 주민센터",
+                                   "host": "월계1동 주민자치회", "fee": "무료", "summary": "동네 음악회"}}],
             "stop_reason": "tool_use", "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 10}})
     client = anthropic.Anthropic(api_key="test", http_client=hx.Client(transport=hx.MockTransport(handler)))
     monkeypatch.setattr(ai, "_client", client)
-    res = ai.classify_report(b"\xff\xd8fakejpeg", "보도블록")
-    assert res == {"category": "road_damage", "confidence": 0.92, "summary": "보도블록이 깨져 있음", "severity": 2, "privacy": False}
+    res = ai.extract_poster(b"\xff\xd8fakejpeg", "2026-09-28")
+    assert res["title"] == "월계 가을 작은음악회" and res["start"] == "2026-10-10 18:00" and res["is_event"] is True
     body = seen["body"]
-    assert body["tool_choice"] == {"type": "tool", "name": "report_classification"}
+    assert body["tool_choice"] == {"type": "tool", "name": "poster_event"}
     assert body["messages"][0]["content"][0]["type"] == "image"
     assert body["messages"][0]["content"][0]["source"]["media_type"] == "image/jpeg"
 
@@ -144,14 +144,6 @@ def test_osm_json_conversion():
     assert ring[0] == ring[-1] and len(ring) == 5
 
 
-def test_hotspots():
-    reps = [{"lat": 37.6200 + i * 0.00005, "lng": 127.0590, "category": "trash", "status": "received",
-             "created_at": "2026-09-24T10:00"} for i in range(4)]
-    reps.append({"lat": 37.6150, "lng": 127.0650, "category": "trash", "status": "received", "created_at": "2026-09-24T10:00"})
-    hs = hotspots(reps)
-    assert len(hs) == 1 and hs[0]["count"] == 4 and hs[0]["top_category"] == "trash"
-
-
 def test_overlay_flags_apply_to_added_paths():
     base = geo.base_graph()
     add = [[37.61950, 127.05950], [37.61985, 127.06020]]
@@ -161,8 +153,8 @@ def test_overlay_flags_apply_to_added_paths():
     assert custom and all(e[4] & geo.F_BLOCK for e in custom)
 
 
-def test_auth_tokens_and_private_reports():
-    """탈퇴 후 같은 id 재사용 금지, 비밀번호 변경 시 예전 토큰 무효, 공개 목록에 신고 설명 비노출."""
+def test_auth_tokens():
+    """탈퇴 후 같은 id 재사용 금지, 비밀번호 변경 시 예전 토큰 무효."""
     import io
     from fastapi.testclient import TestClient
     from PIL import Image
@@ -179,18 +171,11 @@ def test_auth_tokens_and_private_reports():
         assert c.get("/api/auth/me", headers=H).status_code == 401
         H = {"Authorization": f"Bearer {new['token']}"}
         assert c.get("/api/auth/me", headers=H).status_code == 200
-        buf = io.BytesIO(); Image.new("RGB", (64, 64)).save(buf, "JPEG")
-        r = c.post("/api/reports", headers=H, files={"photo": ("a.jpg", buf.getvalue(), "image/jpeg")},
-                   data={"lat": "37.62", "lng": "127.059", "category": "trash", "description": "101동 1203호 010-1234-5678"}).json()
-        pub = c.get("/api/reports").json()
-        assert all("010-1234" not in (x.get("summary") or "") for x in pub)
-        assert c.get(f"/api/reports/{r['id']}/thumb").status_code == 403          # 서명 없으면 거부
-        assert c.get(r["thumb_url"]).status_code == 200                            # 서명된 주소는 허용
         assert c.get("/api/events?when=month&year=10000&month=12").status_code == 422
 
 
 def test_gemini_request_shape(monkeypatch):
-    """Gemini REST 요청 형식(이미지·구조화 출력)과 응답 해석 (실제 호출 없이)."""
+    """Gemini REST 요청 형식(포스터 이미지·구조화 출력)과 응답 해석 (실제 호출 없이)."""
     from app.services import ai
     seen = {}
 
@@ -198,21 +183,21 @@ def test_gemini_request_shape(monkeypatch):
         seen["url"] = str(req.url)
         seen["key"] = req.headers.get("x-goog-api-key")
         seen["body"] = json.loads(req.content)
-        out = {"category": "illegal_parking", "confidence": 0.8, "summary": "보도 위 주차 차량", "severity": 2, "privacy": True}
+        out = {"is_event": True, "title": "경로당 바자회", "category": "community", "start": "2026-10-03", "end": "",
+               "time_text": "10월 3일", "place": "월계1동 경로당", "host": "", "fee": "", "summary": "바자회"}
         return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps(out, ensure_ascii=False)}]},
                                                          "finishReason": "STOP"}]})
     monkeypatch.setattr(ai, "GEMINI_API_KEY", "g-test")
     monkeypatch.setattr(ai, "AI_PROVIDER", "")
     monkeypatch.setattr(ai, "_gemini_http", httpx.Client(transport=httpx.MockTransport(handler)))
     assert ai.provider() == "gemini"
-    res = ai.classify_report(b"\xff\xd8fakejpeg")
-    assert res["category"] == "illegal_parking" and res["privacy"] is True and res["severity"] == 2
+    res = ai.extract_poster(b"\xff\xd8fakejpeg", "2026-09-28")
+    assert res["title"] == "경로당 바자회" and res["category"] == "community"
     assert seen["key"] == "g-test" and ":generateContent" in seen["url"]
     body = seen["body"]
     assert body["contents"][0]["parts"][0]["inlineData"]["mimeType"] == "image/jpeg"
     sch = body["generationConfig"]["responseSchema"]
-    assert sch["type"] == "OBJECT" and "enum" in sch["properties"]["category"]
-    assert "enum" not in sch["properties"]["severity"]           # 숫자 enum 은 Gemini 가 지원하지 않아 제거
+    assert sch["type"] == "OBJECT" and "enum" in sch["properties"]["category"] and sch["properties"]["is_event"]["type"] == "BOOLEAN"
 
 
 def test_gemini_quota(monkeypatch):
@@ -222,7 +207,7 @@ def test_gemini_quota(monkeypatch):
     monkeypatch.setattr(ai.time, "sleep", lambda s: None)
     import pytest
     with pytest.raises(ai.QuotaError):
-        ai.classify_report(b"x")
+        ai.extract_poster(b"x", "2026-09-28")
 
 
 def test_walk_route_and_search(monkeypatch):
@@ -251,27 +236,31 @@ def test_walk_route_and_search(monkeypatch):
         assert c.get("/api/route/walk", params={"from": "35.1,129.0", "to": "37.63,127.06"}).status_code == 400   # 30km 초과
 
 
-def test_live_board(monkeypatch):
-    """실시간 소식: 뉴스 RSS 해석, '월계' 기사만, 앱 소식과 비교해 가장 최근 것 하나."""
+def test_live_board():
+    """실시간 보드: 뉴스 없이, 7일 안에 열리는 월계동 행사만 무작위로."""
     from datetime import timedelta
-    from email.utils import format_datetime
     from fastapi.testclient import TestClient
+    from app.db import SessionLocal
     from app.main import app
-    from app.models import KST, now
-    from app.routers import live
-    t_new = format_datetime((now() - timedelta(minutes=30)).replace(tzinfo=KST))
-    t_old = format_datetime((now() - timedelta(days=3)).replace(tzinfo=KST))
-    rss = f"""<?xml version="1.0"?><rss><channel>
-      <item><title>노원구 월계1동 경로당 개소 - 노원신문</title><link>https://news.example/a</link><pubDate>{t_new}</pubDate><source url="x">노원신문</source></item>
-      <item><title>서울 날씨 맑음 - 어느신문</title><link>https://news.example/b</link><pubDate>{t_new}</pubDate><source url="x">어느신문</source></item>
-      <item><title>월계동 축제 - 동북일보</title><link>https://news.example/c</link><pubDate>{t_old}</pubDate><source url="x">동북일보</source></item>
-    </channel></rss>"""
-    monkeypatch.setattr(live, "_http", httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=rss))))
-    live._reset_cache_for_tests()
-    with TestClient(app) as c:
-        item = c.get("/api/live").json()["item"]
-    assert item["kind"] == "news" and item["title"] == "노원구 월계1동 경로당 개소" and item["source"] == "노원신문"
-    live._reset_cache_for_tests()
+    from app.models import Event, now
+    t = now()
+    with TestClient(app) as c, SessionLocal() as db:
+        db.add_all([
+            Event(title="라이브 테스트 곧", category="culture", start_at=t + timedelta(days=2), lat=37.61515, lng=127.06419,
+                  status="approved", source="manual", source_id="live1"),
+            Event(title="라이브 테스트 먼 미래", category="culture", start_at=t + timedelta(days=20), lat=37.61515, lng=127.06419,
+                  status="approved", source="manual", source_id="live2"),
+            Event(title="라이브 테스트 동 밖", category="culture", start_at=t + timedelta(days=1), lat=37.6545, lng=127.0567,
+                  status="approved", source="manual", source_id="live3"),
+        ])
+        db.commit()
+        items = c.get("/api/live").json()["items"]
+        titles = [x["title"] for x in items]
+        assert "라이브 테스트 곧" in titles and "라이브 테스트 먼 미래" not in titles and "라이브 테스트 동 밖" not in titles
+        assert all(x.get("kind") for x in items) and next(x for x in items if x["title"] == "라이브 테스트 곧")["when_label"] == "2일 뒤"
+        for e in db.query(Event).filter(Event.source_id.in_(["live1", "live2", "live3"])).all():
+            db.delete(e)
+        db.commit()
 
 
 def test_kw_campus_places():
@@ -311,7 +300,8 @@ def test_official_events(monkeypatch):
             assert n >= 70
             ev = db.query(Event).filter_by(source="nowon", source_id="2026-09:moonlight-market").one()
             assert ev.status == "approved" and ev.lat and "석계역" in ev.place_name and ev.start_at.hour == 14
-            assert official.import_bundled(db)[0]["added"] == 0          # 다시 켜도 중복 등록 안 함
+            assert official.import_bundled(db) == []                      # 서버를 다시 켜도 다시 넣지 않음
+            assert official.import_bundled(db, force=True)[0]["added"] == 0   # 강제로 넣어도 중복 없음
         from app.auth import hash_password, make_token
         from app.models import User
         with SessionLocal() as db:
@@ -382,3 +372,452 @@ def test_basemap_service_area():
     assert bm["an"] == ["월계1동", "월계2동"] and len(bm["a"]) == 2
     assert bm["ab"] == [[37.61, 127.05], [37.63, 127.06]]
     assert geo._pip([37.615, 127.055], bm["b"]) and not geo._pip([37.625, 127.055], bm["b"])
+    assert len(bm["ao"]) == 1                                         # 붙어 있는 두 동 → 바깥 경계 하나
+    lats = [q[0] for q in bm["ao"][0]]
+    assert min(lats) < 37.6105 and max(lats) > 37.6295
+
+
+def _user_headers(c, username):
+    r = c.post("/api/auth/register", json={"username": username, "password": "secret12", "nickname": username})
+    if r.status_code != 200:
+        r = c.post("/api/auth/login", json={"username": username, "password": "secret12"})
+    return {"Authorization": f"Bearer {r.json()['token']}"}
+
+
+def test_event_tips(monkeypatch):
+    """주민 행사 제보: 로그인 필수, 월계동 밖 거부, 포스터는 승인 전 비공개, 승인·반려 시 제보자 알림, 대기 제보 제한."""
+    import io
+    from fastapi.testclient import TestClient
+    from PIL import Image
+    from app.auth import hash_password, make_token
+    from app.db import SessionLocal
+    from app.main import app
+    from app.models import Event, Notification, User
+    from app.routers import tips
+    with TestClient(app) as c:
+        form = {"title": "월계1동 경로당 가을 바자회", "category": "community", "start_date": "2026-10-10", "start_time": "10:00",
+                "end_time": "15:00", "place_name": "월계1동 경로당", "lat": "37.61665", "lng": "127.06439",
+                "description": "직접 만든 반찬과 옷 판매", "contact": "010-0000-0000"}
+        assert c.post("/api/tips", data=form).status_code == 401                              # 로그인 필요
+        H = _user_headers(c, "tipper1")
+        bad = dict(form, lat="37.6545", lng="127.0567")                                       # 노원구청 (월계동 밖)
+        assert c.post("/api/tips", headers=H, data=bad).status_code == 400
+        buf = io.BytesIO(); Image.new("RGB", (80, 120), "orange").save(buf, "JPEG")
+        t = c.post("/api/tips", headers=H, data=form, files={"photo": ("p.jpg", buf.getvalue(), "image/jpeg")}).json()
+        assert t["status"] == "pending" and t["end_at"] == "2026-10-10T15:00" and t["image_url"]
+        assert c.get(t["image_url"]).status_code == 403                                       # 승인 전 포스터 비공개
+        assert all(e["id"] != t["id"] for e in c.get("/api/events?when=all").json())         # 승인 전엔 목록에 없음
+        mine = c.get("/api/tips/mine", headers=H).json()
+        assert mine[0]["id"] == t["id"] and mine[0]["status_label"] == "확인 중"
+        with SessionLocal() as db:
+            admin = db.query(User).filter_by(username="tipadmin").one_or_none()
+            if not admin:
+                admin = User(username="tipadmin", nickname="관리", password_hash=hash_password("x-pass-123"), is_admin=True)
+                db.add(admin); db.commit()
+            AH = {"Authorization": f"Bearer {make_token(admin)}"}
+            ev = db.get(Event, t["id"])
+            assert "010-0000-0000" in ev.ai_note and ev.contact == ""                          # 연락처는 관리자 메모에만
+        adm = [e for e in c.get("/api/admin/events?status=pending", headers=AH).json() if e["id"] == t["id"]][0]
+        assert c.get(adm["poster_admin_url"]).status_code == 200                              # 관리자는 서명된 주소로 봄
+        rp = c.patch(f"/api/admin/events/{t['id']}", headers=AH, json={"title": t["title"], "status": "approved"})
+        assert rp.status_code == 200, rp.text
+        assert c.get(t["image_url"]).status_code == 200                                       # 승인 후 공개
+        with SessionLocal() as db:
+            uid = db.query(User).filter_by(username="tipper1").one().id
+            n = db.query(Notification).filter_by(user_id=uid, kind="tip_result").all()
+            assert len(n) == 1 and n[0].link == f"#/event/{t['id']}"
+        # 대기 제보는 5개까지
+        for i in range(5):
+            c.post("/api/tips", headers=H, data=dict(form, title=f"테스트 제보 {i}"))
+        assert c.post("/api/tips", headers=H, data=dict(form, title="여섯 번째")).status_code == 429
+        pend = [x for x in c.get("/api/tips/mine", headers=H).json() if x["status"] == "pending"]
+        assert c.delete(f"/api/tips/{pend[0]['id']}", headers=H).json()["ok"]
+        # 같은 장소 다른 행사
+        sp = c.get(f"/api/events/{t['id']}/same-place").json()
+        assert "current" in sp and "past" in sp
+        with SessionLocal() as db:
+            for e in db.query(Event).filter(Event.source == "tip").all():
+                tips.delete_poster(e); db.delete(e)
+            db.commit()
+
+
+def test_event_kinds():
+    """세부 종류(아이콘·필터): 제목·설명 키워드, 없으면 큰 분류 기본값."""
+    from app.services.kinds import event_kind
+    assert event_kind("찾아가는 오케스트라", "", "culture") == "music"
+    assert event_kind("제3회 석계역 달빛야시장", "", "culture") == "market"
+    assert event_kind("노원구청장배 댄스스포츠대회", "", "community") == "sports"
+    assert event_kind("제18회 전국 발달장애인 댄스경연대회", "", "culture") == "show"
+    assert event_kind("노원미술협회 제30회 정기전", "", "culture") == "exhibit"
+    assert event_kind("2026학년도 모의 IR 경진대회", "", "academic") == "contest"
+    assert event_kind("이름만 있는 행사", "", "academic") == "class"
+
+
+def test_ai_fill(monkeypatch):
+    """AI 빈칸 채우기: 원문이 있을 때만 날짜·장소를 채우고, 없으면 소개만."""
+    from datetime import datetime
+    from app.models import Event
+    from app.services import ai, eventfill
+    fake = {"description": "동네 주민이 함께하는 가을 음악회입니다.", "start": "2026-10-10 18:00", "end": "2026-10-10 20:00",
+            "time_text": "10월 10일 오후 6시", "place": "월계1동 주민센터", "host": "주민자치회", "fee": "무료", "target": "누구나"}
+    monkeypatch.setattr(ai, "fill_event", lambda known, src, today: dict(fake))
+    e = Event(title="가을 음악회", category="culture", description="", time_text="", place_name="", host="", fee="",
+              start_at=datetime(2026, 10, 10, 18, 0), url="")
+    sug = eventfill.suggest(e, src="")                               # 원문 없음 → 소개만
+    assert set(sug) == {"description"} and "대상: 누구나" in sug["description"]
+    sug = eventfill.suggest(e, src="10월 10일 18:00~20:00 월계1동 주민센터 무료")
+    assert sug["end_at"] == datetime(2026, 10, 10, 20, 0) and sug["place_name"] == "월계1동 주민센터" and "start_at" not in sug
+    eventfill.apply(e, sug)
+    assert e.fee == "무료" and "AI로 채움" in e.ai_note
+
+
+def test_review_media():
+    """후기 사진·영상: 본인만 첨부, 4개 제한, 공개 주소로 보기, 후기 지우면 파일도 지움."""
+    import io
+    from datetime import timedelta
+    from fastapi.testclient import TestClient
+    from PIL import Image
+    from app.db import SessionLocal
+    from app.main import app
+    from app.models import Event, now
+    from app.routers.media import MEDIA_DIR
+    with TestClient(app) as c:
+        with SessionLocal() as db:
+            ev = Event(title="후기 테스트 행사", category="culture", start_at=now() - timedelta(days=1), lat=37.615, lng=127.064,
+                       status="approved", source="manual", source_id="rv-media")
+            db.add(ev); db.commit(); eid = ev.id
+        H = _user_headers(c, "reviewer1")
+        H2 = _user_headers(c, "reviewer2")
+        rid = c.post(f"/api/events/{eid}/reviews", headers=H, json={"rating": 5, "body": "정말 좋았어요"}).json()["id"]
+        buf = io.BytesIO(); Image.new("RGB", (200, 100), "red").save(buf, "PNG")
+        files = [("files", ("a.png", buf.getvalue(), "image/png")), ("files", ("v.mp4", b"\x00\x00\x00\x18ftypmp42", "video/mp4"))]
+        assert c.post(f"/api/reviews/{rid}/media", headers=H2, files=files).status_code == 403
+        up = c.post(f"/api/reviews/{rid}/media", headers=H, files=files).json()
+        assert [m["kind"] for m in up] == ["image", "video"]
+        assert c.get(up[0]["url"]).headers["content-type"] == "image/jpeg"
+        assert c.get(up[1]["url"]).status_code == 200
+        too_many = [("files", (f"{i}.png", buf.getvalue(), "image/png")) for i in range(3)]
+        assert c.post(f"/api/reviews/{rid}/media", headers=H, files=too_many).status_code == 400
+        detail = c.get(f"/api/events/{eid}").json()
+        assert len(detail["reviews"][0]["media"]) == 2 and detail["kind"]
+        names = [m["url"].rsplit("/", 1)[1] for m in up]
+        assert c.delete(f"/api/events/reviews/{rid}", headers=H).json()["ok"]
+        assert not any((MEDIA_DIR / n).exists() for n in names)
+        with SessionLocal() as db:
+            db.delete(db.get(Event, eid)); db.commit()
+
+
+def test_painted_stairs_overlay():
+    """칠하기 제보: 칠한 범위를 지나는 경로 구간에 계단 표시, 밖의 구간은 그대로."""
+    base = geo.base_graph()
+    n = base["n"]
+    e0 = base["e"][len(base["e"]) // 2]
+    a, b = n[e0[0]], n[e0[1]]
+    mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]
+    stroke = [[mid[0] - 0.00002, mid[1] - 0.00002], [mid[0] + 0.00002, mid[1] + 0.00002]]
+    g = geo.apply_overlays(base, [{"kind": "stairs", "coords": [], "strokes": [stroke], "brush_m": 6, "open_hours": ""}], [])
+    flagged = [e for e in g["e"] if e[4] & geo.F_STAIRS and not (e0 is None)]
+    assert any(e[0] == e0[0] and e[1] == e0[1] for e in flagged)
+    assert len(flagged) < len(g["e"]) * 0.01                          # 칠한 곳 근처만
+
+
+def test_painted_path_api():
+    """칠하기 제보 API: 계단·가파른 길만 허용, 저장·조회 형식."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as c:
+        H = _user_headers(c, "painter1")
+        stroke = [[37.6195, 127.0595], [37.61955, 127.0596], [37.6196, 127.0597]]
+        r = c.post("/api/map/paths", headers=H, json={"kind": "stairs", "strokes": [stroke], "brush_m": 10})
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert out["strokes"] == [stroke] and out["brush_m"] == 10 and out["coords"] == []
+        assert c.post("/api/map/paths", headers=H, json={"kind": "add", "strokes": [stroke]}).status_code == 400
+        assert c.post("/api/map/paths", headers=H, json={"kind": "steep", "strokes": [[]]}).status_code == 400
+        mine = c.get("/api/map/paths/mine", headers=H).json()
+        assert mine[0]["kind"] == "stairs" and mine[0]["strokes"]
+
+
+def test_event_reset():
+    """행사 초기화: '초기화' 확인 필요, 범위별 삭제, 후기·즐겨찾기도 함께."""
+    from datetime import timedelta
+    from fastapi.testclient import TestClient
+    from app.auth import hash_password, make_token
+    from app.db import SessionLocal
+    from app.main import app
+    from app.models import Event, Favorite, Review, User, now
+    with TestClient(app) as c:
+        with SessionLocal() as db:
+            admin = db.query(User).filter_by(username="resetadmin").one_or_none()
+            if not admin:
+                admin = User(username="resetadmin", nickname="관리", password_hash=hash_password("x-pass-123"), is_admin=True)
+                db.add(admin); db.commit()
+            AH = {"Authorization": f"Bearer {make_token(admin)}"}
+            keep = Event(title="직접 등록 행사", category="culture", source="manual", source_id="rs-keep", status="approved",
+                         start_at=now() - timedelta(days=1), lat=37.615, lng=127.064)
+            gone = Event(title="수집 행사", category="culture", source="seoul", source_id="rs-gone", status="approved",
+                         start_at=now() - timedelta(days=1), lat=37.615, lng=127.064)
+            db.add_all([keep, gone]); db.commit()
+            db.add(Favorite(user_id=admin.id, event_id=gone.id)); db.add(Review(event_id=gone.id, user_id=admin.id, rating=5, body="좋아요"))
+            db.commit(); gid, kid = gone.id, keep.id
+        assert c.post("/api/admin/events/reset", headers=AH, json={"scope": "collected", "confirm": "네"}).status_code == 400
+        r = c.post("/api/admin/events/reset", headers=AH, json={"scope": "collected", "confirm": "초기화"}).json()
+        assert r["deleted"] >= 1 and r["reviews"] >= 1
+        with SessionLocal() as db:
+            assert db.get(Event, gid) is None and db.get(Event, kid) is not None
+            assert db.query(Favorite).filter_by(event_id=gid).count() == 0 and db.query(Review).filter_by(event_id=gid).count() == 0
+            assert db.query(Event).filter(Event.source == "nowon").count() == 0
+        re = c.post("/api/admin/official/reimport", headers=AH).json()
+        assert re["added"] >= 70                                      # 구청 자료 다시 넣기
+        with SessionLocal() as db:
+            db.delete(db.get(Event, kid)); db.commit()
+
+
+def test_elevation_grid(monkeypatch):
+    """고도: 격자(약 90m)로 받아 보간 — 요청 수가 적고, 받은 고도가 경사도에 반영됨."""
+    from app.services import osm_update
+    calls = []
+
+    def handler(req):
+        lats = [float(x) for x in req.url.params["latitude"].split(",")]
+        calls.append(len(lats))
+        return httpx.Response(200, json={"elevation": [(la - 37.6) * 10000 for la in lats]})   # 북쪽으로 갈수록 높아짐
+    real = httpx.Client
+    monkeypatch.setattr(osm_update.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler)))
+    res = osm_update.fetch_elevation(pause=0)
+    assert res["missing"] == 0 and res["nodes_with_elevation"] > 1000
+    assert len(calls) <= 40 and max(calls) <= 100                    # 무료 한도 안에서
+    assert res["graph"]["graded"] > 1000
+    assert osm_update.fetch_elevation(pause=0)["fetched_now"] == 0   # 두 번째는 저장한 격자를 씀
+    (osm_update.DATA_DIR / "elevation.json").unlink(missing_ok=True)
+    (osm_update.DATA_DIR / "elevation_grid.json").unlink(missing_ok=True)
+    from app.services import geo
+    geo.reset_cache()
+
+
+def test_place_locate():
+    """장소 이름만 있는 행사 → 지도 이름·별칭으로 위치 찾기 (오인 방지 포함)."""
+    from app.services import places
+    hit = places.locate("월계도서관 4층 달빛소리홀")
+    assert hit and hit[2] == "월계문화정보도서관" and geo.area_contains(hit[0], hit[1])
+    assert places.locate("광운대링크")[2] == "광운대학교"
+    assert places.locate("마들스포츠타운 테니스장") is None or "테니스장" != places.locate("마들스포츠타운 테니스장")[2]
+    assert places.locate("롯데월드 어드벤처 (송파구 올림픽로 240)") is None
+    assert places.locate("") is None
+
+
+def test_area_filter_and_search():
+    """지도·달력·목록(area=1)은 월계동 안 행사만, 검색은 밖 행사도 (in_area=False) + 연관어로 찾기."""
+    from datetime import timedelta
+    from fastapi.testclient import TestClient
+    from app.db import SessionLocal
+    from app.main import app
+    from app.models import Event, now
+    with TestClient(app) as c:
+        t = now() + timedelta(days=2)
+        with SessionLocal() as db:
+            evs = [
+                Event(title="월계 그림책 원화 전시", category="culture", source="manual", source_id="af-in", status="approved",
+                      start_at=t, lat=37.62863, lng=127.0561, description="작가의 원화를 함께 봐요"),
+                Event(title="상계동 가을 음악회", category="culture", source="manual", source_id="af-out", status="approved",
+                      start_at=t, lat=37.6545, lng=127.0610, description="오케스트라 공연"),
+                Event(title="어딘가의 오케스트라 콘서트", category="culture", source="manual", source_id="af-noloc", status="approved",
+                      start_at=t, description="클래식"),
+            ]
+            db.add_all(evs); db.commit()
+            ids = [e.id for e in evs]
+        try:
+            area = {e["id"] for e in c.get("/api/events?area=1").json()}
+            allv = {e["id"] for e in c.get("/api/events").json()}
+            assert ids[0] in area and ids[1] not in area and ids[2] not in area
+            assert set(ids) <= allv
+            m = c.get(f"/api/events?area=1&when=month&year={t.year}&month={t.month}").json()
+            assert ids[0] in {e["id"] for e in m} and ids[1] not in {e["id"] for e in m}
+            # '아이' → 이름·소개에 없어도 '그림책'으로 연결
+            r = c.get("/api/events/search", params={"q": "아이"}).json()
+            hit = {e["id"]: e for e in r["items"]}
+            assert ids[0] in hit and hit[ids[0]]["in_area"] is True and "그림책" in " ".join(hit[ids[0]]["reasons"])
+            assert "어린이" in r["related"]
+            # '음악' → 밖 행사·위치 없는 행사도 검색에는 나옴
+            r = c.get("/api/events/search", params={"q": "음악"}).json()
+            hit = {e["id"]: e for e in r["items"]}
+            assert ids[1] in hit and hit[ids[1]]["in_area"] is False
+            assert ids[2] in hit                                     # '콘서트·오케스트라' → 음악 종류
+        finally:
+            with SessionLocal() as db:
+                for i in ids:
+                    db.delete(db.get(Event, i))
+                db.commit()
+
+
+def test_calendar_notes():
+    """달력 날짜별 메모: 로그인 필요, 저장·월별 조회·빈 글로 지우기, 남의 메모는 안 보임."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as c:
+        assert c.put("/api/me/notes/2026-10-12", json={"text": "x"}).status_code == 401
+        h1, h2 = _user_headers(c, "noteuser1"), _user_headers(c, "noteuser2")
+        assert c.put("/api/me/notes/2026-10-12", headers=h1, json={"text": "  도서관 반납  "}).json()["text"] == "도서관 반납"
+        c.put("/api/me/notes/2026-10-20", headers=h1, json={"text": "축제"})
+        c.put("/api/me/notes/2026-11-01", headers=h1, json={"text": "다음 달"})
+        assert c.put("/api/me/notes/2026-1-1", headers=h1, json={"text": "x"}).status_code == 400
+        got = c.get("/api/me/notes?year=2026&month=10", headers=h1).json()
+        assert got == {"2026-10-12": "도서관 반납", "2026-10-20": "축제"}
+        assert c.get("/api/me/notes?year=2026&month=10", headers=h2).json() == {}
+        c.put("/api/me/notes/2026-10-20", headers=h1, json={"text": ""})
+        assert "2026-10-20" not in c.get("/api/me/notes?year=2026&month=10", headers=h1).json()
+
+
+def test_admin_bulk_and_locate():
+    """관리자: 위치 없는 행사도 승인 가능(검색 전용), 장소 이름으로 위치 찾기, 여러 개 한 번에 승인."""
+    from fastapi.testclient import TestClient
+    from app.auth import hash_password, make_token
+    from app.db import SessionLocal
+    from app.main import app
+    from app.models import Event, User
+    with TestClient(app) as c:
+        with SessionLocal() as db:
+            admin = db.query(User).filter_by(username="bulkadmin").one_or_none()
+            if not admin:
+                admin = User(username="bulkadmin", nickname="관리", password_hash=hash_password("x-pass-123"), is_admin=True)
+                db.add(admin); db.commit()
+            AH = {"Authorization": f"Bearer {make_token(admin)}"}
+            a = Event(title="월계도서관 북토크", place_name="월계도서관 4층 달빛소리홀", source="nowon", source_id="bk-a", status="pending")
+            b = Event(title="먼 곳 행사", place_name="충북 제천시 체육관", source="nowon", source_id="bk-b", status="pending")
+            db.add_all([a, b]); db.commit()
+            ia, ib = a.id, b.id
+        try:
+            r = c.post("/api/admin/events/locate", headers=AH).json()
+            assert r["found"] >= 1
+            rows = {e["id"]: e for e in c.get("/api/admin/events?status=pending&area=in", headers=AH).json()}
+            assert ia in rows and ib not in rows
+            assert c.post("/api/admin/events/bulk", headers=AH, json={"ids": [ia, ib], "status": "approved"}).json()["changed"] == 2
+            with SessionLocal() as db:
+                assert db.get(Event, ia).status == "approved" and db.get(Event, ib).status == "approved"
+                assert db.get(Event, ib).lat is None                 # 위치 없음 → 검색에서만
+        finally:
+            with SessionLocal() as db:
+                for i in (ia, ib):
+                    db.delete(db.get(Event, i))
+                db.commit()
+
+
+def test_admin_approve_pending():
+    """관리자: 승인 대기 행사 한 번에 공개 (월계동 안만 / 전체)."""
+    from fastapi.testclient import TestClient
+    from app.auth import hash_password, make_token
+    from app.db import SessionLocal
+    from app.main import app
+    from app.models import Event, User
+    with TestClient(app) as c:
+        with SessionLocal() as db:
+            db.query(Event).filter(Event.status == "pending").update({"status": "rejected"})
+            admin = db.query(User).filter_by(username="apadmin").one_or_none()
+            if not admin:
+                admin = User(username="apadmin", nickname="관리", password_hash=hash_password("x-pass-123"), is_admin=True)
+                db.add(admin)
+            db.commit()
+            AH = {"Authorization": f"Bearer {make_token(admin)}"}
+            a = Event(title="안 행사", place_name="월계도서관 2층", source="nowon", source_id="ap-a", status="pending")
+            b = Event(title="밖 행사", place_name="노원구청 대강당", source="nowon", source_id="ap-b", status="pending")
+            db.add_all([a, b]); db.commit()
+            ia, ib = a.id, b.id
+        try:
+            r = c.post("/api/admin/events/approve-pending", headers=AH, json={"area": "in"}).json()
+            assert r["approved"] == 1 and r["inside"] == 1
+            r = c.post("/api/admin/events/approve-pending", headers=AH, json={"area": "all"}).json()
+            assert r["approved"] == 1
+            with SessionLocal() as db:
+                assert db.get(Event, ia).status == db.get(Event, ib).status == "approved"
+        finally:
+            with SessionLocal() as db:
+                for i in (ia, ib):
+                    db.delete(db.get(Event, i))
+                db.commit()
+
+
+def test_push_prefs_feed_broadcast():
+    """알림 설정(즐겨찾기 알림 시간), 앱 알림 묶음(feed), 관리자 일괄 알림(추천·직접·즐겨찾기)."""
+    from datetime import timedelta
+    from fastapi.testclient import TestClient
+    from app.auth import hash_password, make_token
+    from app.db import SessionLocal
+    from app.main import app, remind_favorites
+    from app.models import Broadcast, Event, Favorite, Notification, User, now
+    with TestClient(app) as c:
+        h = _user_headers(c, "pushuser1")
+        assert c.get("/api/me/prefs", headers=h).json()["fav_hours"] == 24
+        assert c.put("/api/me/prefs", headers=h, json={"fav_hours": 5}).status_code == 400
+        assert c.put("/api/me/prefs", headers=h, json={"fav_hours": 2, "promo": False}).json() == {"fav_hours": 2, "promo": False}
+        with SessionLocal() as db:
+            uid = db.query(User).filter_by(username="pushuser1").one().id
+            admin = db.query(User).filter_by(username="bcadmin").one_or_none()
+            if not admin:
+                admin = User(username="bcadmin", nickname="관리", password_hash=hash_password("x-pass-123"), is_admin=True)
+                db.add(admin); db.commit()
+            AH = {"Authorization": f"Bearer {make_token(admin)}"}
+            soon = Event(title="곧 하는 행사", category="culture", source="manual", source_id="push-a", status="approved",
+                         start_at=(now() + timedelta(minutes=90)).replace(second=0, microsecond=0), lat=37.62863, lng=127.0561)
+            later = Event(title="나중 행사", category="culture", source="manual", source_id="push-b", status="approved",
+                          start_at=(now() + timedelta(hours=5)).replace(second=0, microsecond=0), lat=37.62863, lng=127.0561)
+            db.add_all([soon, later]); db.commit()
+            db.add_all([Favorite(user_id=uid, event_id=soon.id), Favorite(user_id=uid, event_id=later.id)]); db.commit()
+            ids = (soon.id, later.id)
+        try:
+            # 처음 연결(-1): 지난 것은 안 주고 마지막 id만
+            f0 = c.get("/api/app/feed", headers=h).json()
+            assert f0["broadcasts"] == [] and f0["notifications"] == []
+            # 즐겨찾기 알림: 2시간 전 설정 → 90분 뒤 행사만
+            remind_favorites()
+            with SessionLocal() as db:
+                refs = {n.ref for n in db.query(Notification).filter_by(user_id=uid, kind="event_soon")}
+            assert f"soon:{ids[0]}" in refs and f"soon:{ids[1]}" not in refs
+            f1 = c.get(f"/api/app/feed?after_bc={f0['latest_bc']}&after_nt={f0['latest_nt']}", headers=h).json()
+            assert any("곧 하는 행사" in n["title"] for n in f1["notifications"])
+            # 관리자: 행사 추천(문구 자동) · 직접 쓰기 · 즐겨찾기 일괄
+            meta = c.get("/api/admin/broadcast/meta", headers=AH).json()
+            ev = next(e for e in meta["events"] if e["id"] == ids[1])
+            assert "어떠세요" in ev["msg_title"]
+            r = c.post("/api/admin/broadcast", headers=AH, json={"mode": "event", "event_id": ids[1]}).json()
+            assert r["sent"] >= 2
+            assert c.post("/api/admin/broadcast", headers=AH, json={"mode": "custom", "title": ""}).status_code == 400
+            assert c.post("/api/admin/broadcast", headers=AH, json={"mode": "custom", "title": "x", "link": "javascript:1"}).status_code == 400
+            c.post("/api/admin/broadcast", headers=AH, json={"mode": "custom", "title": "축제 안내", "body": "토요일", "link": "#/news"})
+            r = c.post("/api/admin/broadcast", headers=AH, json={"mode": "favorites", "hours": 6}).json()
+            assert r["sent"] >= 2
+            # 로그인 안 한 앱도 공지는 받음
+            f2 = c.get(f"/api/app/feed?after_bc={f0['latest_bc']}&promo=1").json()
+            titles = [b["title"] for b in f2["broadcasts"]]
+            assert "축제 안내" in titles and any("나중 행사" in t for t in titles)
+            assert f2["promo"] is None or "어떠세요" in f2["promo"]["title"]
+            with SessionLocal() as db:
+                assert db.query(Notification).filter_by(user_id=uid, kind="notice").count() >= 2
+        finally:
+            with SessionLocal() as db:
+                for i in ids:
+                    db.delete(db.get(Event, i))
+                db.query(Broadcast).delete()
+                db.commit()
+
+
+def test_apk_upload_and_info():
+    """관리자 APK 올리기 → 웹 설치 안내용 정보·내려받기."""
+    from fastapi.testclient import TestClient
+    from app.auth import hash_password, make_token
+    from app.db import SessionLocal
+    from app.main import app
+    from app.models import User
+    with TestClient(app) as c:
+        with SessionLocal() as db:
+            admin = db.query(User).filter_by(username="bcadmin").one_or_none() or User(username="bcadmin", nickname="관리", password_hash=hash_password("x-pass-123"), is_admin=True)
+            db.add(admin); db.commit()
+            AH = {"Authorization": f"Bearer {make_token(admin)}"}
+        assert c.get("/api/app/apk").json()["available"] is False
+        assert c.post("/api/admin/app/apk", headers=AH, files={"file": ("x.txt", b"hello")}).status_code == 400
+        assert c.post("/api/admin/app/apk", headers=AH, files={"file": ("wolgyeon.apk", b"PK\x03\x04" + b"0" * 2000)}).json()["ok"]
+        info = c.get("/api/app/apk").json()
+        assert info["available"] and info["url"] == "/download/wolgyeon.apk"
+        r = c.get("/download/wolgyeon.apk")
+        assert r.status_code == 200 and r.headers["content-type"] == "application/vnd.android.package-archive"
+        c.delete("/api/admin/app/apk", headers=AH)
+        assert c.get("/api/app/apk").json()["available"] is False

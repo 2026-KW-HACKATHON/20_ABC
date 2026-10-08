@@ -34,6 +34,7 @@ def env(name: str, default: str = "") -> str:
 
 WEB_DIR = Path(env("WEB_DIR", SERVER_DIR.parent / "web")).resolve()
 DATA_DIR = Path(env("DATA_DIR", SERVER_DIR / "data")).resolve()
+APK_PATH = DATA_DIR / "download" / "wolgyeon.apk"     # 안드로이드 앱 파일 (관리자 대시보드에서 올림)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = env("DATABASE_URL", f"sqlite:///{DATA_DIR / 'wolgyeon.db'}")
@@ -79,6 +80,7 @@ MAX_UPLOAD_MB = float(env("MAX_UPLOAD_MB", "8"))
 ROUTING_URL = env("ROUTING_URL", "https://routing.openstreetmap.de/routed-foot")
 NOMINATIM_URL = env("NOMINATIM_URL", "https://nominatim.openstreetmap.org")
 KAKAO_REST_KEY = env("KAKAO_REST_KEY", "")   # 있으면 장소 검색을 카카오로 (국내 상호 검색이 훨씬 정확)
+VWORLD_KEY = env("VWORLD_KEY", "")          # 브이월드(국토부) 위성영상 키 — 없으면 Esri 위성영상 사용
 
 # 월계1동 중심 (행사 수집 시 거리 필터 기준)
 CENTER = (37.6205, 127.0585)

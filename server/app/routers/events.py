@@ -8,12 +8,20 @@ from sqlalchemy.orm import Session
 from ..auth import optional_user, require_user
 from ..db import get_db
 from ..models import EVENT_CATEGORIES, Event, Favorite, Review, User, now
+from ..services import geo
+from ..services import search as search_svc
+from ..services.kinds import KINDS, event_kind, kinds_meta
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
 def iso(d: datetime | None) -> str | None:
     return d.isoformat(timespec="minutes") if d else None
+
+
+def in_area(e: Event) -> bool:
+    """월계동 안 행사인지 (좌표가 없으면 '밖'으로 봄 — 지도·달력에는 안 나오고 검색에서만 나옴)."""
+    return e.lat is not None and e.lng is not None and geo.area_contains(e.lat, e.lng)
 
 
 def event_out(e: Event, stats: dict | None = None, fav: bool = False, full: bool = False) -> dict:
@@ -23,8 +31,9 @@ def event_out(e: Event, stats: dict | None = None, fav: bool = False, full: bool
         "start_at": iso(e.start_at), "end_at": iso(e.end_at), "time_text": e.time_text,
         "place_name": e.place_name, "lat": e.lat, "lng": e.lng, "host": e.host, "fee": e.fee,
         "image_url": e.image_url, "source": e.source,
+        "kind": (k := event_kind(e.title, e.description, e.category)), "kind_label": KINDS[k]["label"],
         "fav_count": s.get("fav", 0), "review_count": s.get("rev", 0), "avg_rating": s.get("avg"),
-        "is_favorite": fav,
+        "is_favorite": fav, "in_area": in_area(e),
     }
     if full:
         out.update({"description": e.description, "contact": e.contact, "url": e.url})
@@ -57,10 +66,14 @@ def list_events(
     year: int | None = Query(None, ge=2000, le=2100),
     month: int | None = Query(None, ge=1, le=12),
     q: str | None = None,
+    area: bool = Query(False, description="true 면 월계동 안 행사만 (지도·달력·목록)"),
     user: User | None = Depends(optional_user),
     db: Session = Depends(get_db),
 ):
     stmt = select(Event).where(Event.status == "approved")
+    if area:      # 좌표가 있고 월계동 상자 안인 것만 먼저 거른 뒤, 아래에서 경계선으로 다시 확인
+        s_, w_, n_, e_ = geo.area_bbox()
+        stmt = stmt.where(Event.lat.between(s_, n_), Event.lng.between(w_, e_))
     if category in EVENT_CATEGORIES:
         stmt = stmt.where(Event.category == category)
     if q:
@@ -82,13 +95,35 @@ def list_events(
     if when == "upcoming":
         # 이미 시작한 긴 전시가 목록 맨 위를 차지하지 않도록: '오늘 기준 다음 날짜' → 먼저 끝나는 순
         nxt = case((Event.start_at < today, today), else_=Event.start_at)
-        stmt = stmt.order_by(Event.start_at.is_(None), nxt, end_or_start).limit(300)
+        stmt = stmt.order_by(Event.start_at.is_(None), nxt, end_or_start)
     else:
-        stmt = stmt.order_by(Event.start_at.is_(None), Event.start_at.desc() if when == "past" else Event.start_at).limit(300)
-    rows = list(db.scalars(stmt))
+        stmt = stmt.order_by(Event.start_at.is_(None), Event.start_at.desc() if when == "past" else Event.start_at)
+    rows = list(db.scalars(stmt.limit(1500 if area else 300)))
+    if area:
+        rows = [e for e in rows if in_area(e)][:300]
     ids = [e.id for e in rows]
     st, fv = _stats(db, ids), _favs(db, user, ids)
     return [event_out(e, st.get(e.id), e.id in fv) for e in rows]
+
+
+@router.get("/search")
+def search_events(
+    q: str = Query(..., min_length=1, max_length=60),
+    past: bool = False,
+    category: str | None = None,
+    user: User | None = Depends(optional_user),
+    db: Session = Depends(get_db),
+):
+    """연관어까지 넓혀 찾는 검색. 월계동 밖 행사도 나오며 in_area 로 구분."""
+    hits = search_svc.search(db, q, include_past=past, category=category)
+    ids = [e.id for e, _, _ in hits]
+    st, fv = _stats(db, ids), _favs(db, user, ids)
+    toks = search_svc.tokens(q)
+    related = []
+    for t in toks:
+        related += [w for w in search_svc.expand(t)[0] if w not in related]
+    return {"q": q, "related": related[:12], "items": [
+        {**event_out(e, st.get(e.id), e.id in fv), "score": round(sc, 1), "reasons": why} for e, sc, why in hits]}
 
 
 @router.get("/favorites")
@@ -101,6 +136,12 @@ def my_favorites(user: User = Depends(require_user), db: Session = Depends(get_d
     return [event_out(e, st.get(e.id), True) for e in rows]
 
 
+@router.get("/meta/kinds")
+def event_kinds():
+    """세부 종류(아이콘·필터용)와 큰 분류."""
+    return {"categories": EVENT_CATEGORIES, "kinds": kinds_meta()}
+
+
 @router.get("/{event_id}")
 def get_event(event_id: int, user: User | None = Depends(optional_user), db: Session = Depends(get_db)):
     e = db.get(Event, event_id)
@@ -111,6 +152,7 @@ def get_event(event_id: int, user: User | None = Depends(optional_user), db: Ses
     reviews = db.scalars(select(Review).where(Review.event_id == e.id).order_by(Review.created_at.desc()).limit(100))
     out["reviews"] = [{"id": r.id, "rating": r.rating, "body": r.body, "created_at": iso(r.created_at),
                        "nickname": r.user.nickname if r.user else "탈퇴한 사용자",
+                       "media": [{"id": m.id, "kind": m.kind, "url": f"/api/media/reviews/{m.filename}"} for m in r.media],
                        "mine": bool(user and r.user_id == user.id)} for r in reviews]
     out["can_review"] = bool(user) and (e.start_at is None or e.start_at <= now() + timedelta(hours=1))
     return out
@@ -156,6 +198,8 @@ def delete_review(review_id: int, user: User = Depends(require_user), db: Sessio
         raise HTTPException(404, "후기를 찾을 수 없습니다.")
     if r.user_id != user.id and not user.is_admin:
         raise HTTPException(403, "본인이 쓴 후기만 지울 수 있습니다.")
+    from .media import delete_review_files
+    delete_review_files(r)
     db.delete(r)
     db.commit()
     return {"ok": True}

@@ -22,25 +22,6 @@ EVENT_CATEGORIES = {
     "community": "지역·참여",
 }
 
-# 신문고 유형
-REPORT_CATEGORIES = {
-    "road_damage": "도로·보도 파손",
-    "obstacle": "보행 장애물·단차",
-    "illegal_parking": "불법 주정차",
-    "trash": "쓰레기·무단투기",
-    "facility": "공공시설 고장",
-    "construction": "공사·먼지",
-    "safety": "사고·안전 위험",
-    "accessibility": "휠체어·유아차 통행 불가",
-    "other": "기타",
-}
-REPORT_STATUS = {
-    "received": "접수",
-    "checking": "확인 중",
-    "resolved": "처리 완료",
-    "rejected": "반려",
-}
-
 # 길 제보 유형
 PATH_KINDS = {
     "add": "새 길 (지도에 없는 길)",
@@ -81,7 +62,7 @@ class Event(Base):
     fee: Mapped[str] = mapped_column(String(200), default="")
     url: Mapped[str] = mapped_column(String(500), default="")
     image_url: Mapped[str] = mapped_column(String(500), default="")
-    source: Mapped[str] = mapped_column(String(20), default="manual")   # manual / seoul / kw
+    source: Mapped[str] = mapped_column(String(20), default="manual")   # manual / seoul / kw / nowon / tip(주민 제보)
     source_id: Mapped[str] = mapped_column(String(120), default="")
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)  # pending/approved/rejected
     ai_note: Mapped[str] = mapped_column(Text, default="")
@@ -111,28 +92,19 @@ class Review(Base):
 
     event = relationship("Event", back_populates="reviews")
     user = relationship("User")
+    media = relationship("ReviewMedia", cascade="all, delete-orphan", order_by="ReviewMedia.id")
 
 
-class Report(Base):
-    __tablename__ = "reports"
+class ReviewMedia(Base):
+    """후기에 붙인 사진·영상 (파일은 DATA_DIR/media/reviews/ 에 저장)."""
+    __tablename__ = "review_media"
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    lat: Mapped[float] = mapped_column(Float)
-    lng: Mapped[float] = mapped_column(Float)
-    category: Mapped[str] = mapped_column(String(30), index=True)
-    description: Mapped[str] = mapped_column(Text, default="")
-    ai_category: Mapped[str] = mapped_column(String(30), default="")
-    ai_confidence: Mapped[float] = mapped_column(Float, default=0)
-    ai_summary: Mapped[str] = mapped_column(Text, default="")
-    ai_severity: Mapped[int] = mapped_column(Integer, default=0)
-    status: Mapped[str] = mapped_column(String(20), default="received", index=True)
-    admin_note: Mapped[str] = mapped_column(Text, default="")
-    image: Mapped[bytes] = mapped_column(LargeBinary)
-    thumb: Mapped[bytes] = mapped_column(LargeBinary)
+    review_id: Mapped[int] = mapped_column(ForeignKey("reviews.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(10))          # image / video
+    filename: Mapped[str] = mapped_column(String(120))
+    mime: Mapped[str] = mapped_column(String(40))
+    size: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
-
-    user = relationship("User")
 
 
 class Notification(Base):
@@ -174,18 +146,49 @@ class Construction(Base):
     dust: Mapped[bool] = mapped_column(Boolean, default=True)
     note: Mapped[str] = mapped_column(Text, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    report_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    report_id: Mapped[int | None] = mapped_column(Integer, nullable=True)   # (예전 신문고 연결용, 사용 안 함)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
-class Todo(Base):
-    __tablename__ = "todos"
+class EventTag(Base):
+    """검색용 연관 키워드 (AI가 행사 이름·소개를 읽고 붙임). 새 표라서 기존 DB에도 자동으로 추가됨."""
+    __tablename__ = "event_tags"
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), primary_key=True)
+    tags: Mapped[str] = mapped_column(Text, default="")          # 쉼표로 구분
+    sig: Mapped[str] = mapped_column(String(20), default="")      # 제목·소개가 바뀌면 다시 만들기 위한 지문
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class CalendarNote(Base):
+    """달력 날짜별 개인 메모."""
+    __tablename__ = "calendar_notes"
+    __table_args__ = (UniqueConstraint("user_id", "day", name="uq_note_day"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    text: Mapped[str] = mapped_column(String(100))
-    done: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    day: Mapped[str] = mapped_column(String(10), index=True)      # YYYY-MM-DD
+    text: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class UserPref(Base):
+    """사용자 설정 (JSON). 예: {"fav_hours": 24, "promo": true} — 새 표라서 기존 DB에도 자동으로 추가됨."""
+    __tablename__ = "user_prefs"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    data: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class Broadcast(Base):
+    """관리자가 모두에게 보낸 알림 — 로그인하지 않은 앱 사용자 휴대폰에도 감."""
+    __tablename__ = "broadcasts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), default="custom")     # custom / event / favorites
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text, default="")
+    link: Mapped[str] = mapped_column(String(200), default="")
+    sent: Mapped[int] = mapped_column(Integer, default=0)                # 앱 안 알림을 받은 사용자 수
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
 class CollectLog(Base):

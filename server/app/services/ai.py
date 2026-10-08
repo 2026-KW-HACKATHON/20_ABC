@@ -1,4 +1,4 @@
-"""AI 연결 — 사진 신문고 분류, 공지 → 행사 정보 추출, 메모 분류(보조).
+"""AI 연결 — 행사 포스터 사진 → 행사 정보, 공지·구청 문서 → 행사 정보 추출, 메모 분류(보조).
 
 Gemini API(무료 등급 있음) 또는 Claude API 중 하나를 씁니다.
   AI_PROVIDER=gemini | anthropic  (비우면 키가 있는 쪽을 자동 선택, 둘 다 있으면 gemini)
@@ -13,7 +13,7 @@ import time
 import httpx
 
 from ..config import AI_PROVIDER, ANTHROPIC_API_KEY, ANTHROPIC_MODEL, GEMINI_API_KEY, GEMINI_MODEL
-from ..models import EVENT_CATEGORIES, REPORT_CATEGORIES
+from ..models import EVENT_CATEGORIES
 
 log = logging.getLogger("wolgyeon.ai")
 _client = None          # Claude SDK 클라이언트
@@ -136,49 +136,42 @@ def _gemini_call(system: str, content: list, schema: dict, max_tokens: int, time
         raise RuntimeError(f"Gemini 응답을 해석하지 못했습니다 ({reason or e}).")
 
 
-# ------------------------------------------------------------------ 신문고 사진 분류
-_REPORT_TOOL = {
-    "name": "report_classification",
-    "description": "주민이 찍은 동네 불편 사진의 분류 결과를 기록한다.",
+# ------------------------------------------------------------------ 행사 포스터 사진 → 행사 정보 (주민 행사 제보)
+_POSTER_TOOL = {
+    "name": "poster_event",
+    "description": "행사 포스터·전단·안내문 사진에서 행사 정보를 읽어 기록한다.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "category": {"type": "string", "enum": list(REPORT_CATEGORIES.keys()) + ["not_issue"],
-                         "description": "; ".join(f"{k}={v}" for k, v in REPORT_CATEGORIES.items()) +
-                                        "; not_issue=동네 불편과 관계없는 사진"},
-            "confidence": {"type": "number", "description": "0~1 사이 확신도"},
-            "summary": {"type": "string", "description": "사진 속 문제를 한국어 한 문장으로 (40자 이내)"},
-            "severity": {"type": "integer", "enum": [1, 2, 3], "description": "1=경미, 2=보통, 3=즉시 조치 필요"},
-            "privacy": {"type": "boolean", "description": "사람 얼굴이나 차량 번호판이 또렷하게 보이면 true"},
+            "is_event": {"type": "boolean", "description": "사진이 행사(공연·전시·장터·강연·축제·모임 등) 안내물이면 true"},
+            "title": {"type": "string", "description": "행사 이름. 모르면 빈 문자열"},
+            "category": {"type": "string", "enum": list(EVENT_CATEGORIES.keys()),
+                         "description": "; ".join(f"{k}={v}" for k, v in EVENT_CATEGORIES.items())},
+            "start": {"type": "string", "description": "시작 YYYY-MM-DD 또는 YYYY-MM-DD HH:MM. 모르면 빈 문자열"},
+            "end": {"type": "string", "description": "끝 YYYY-MM-DD 또는 YYYY-MM-DD HH:MM. 모르면 빈 문자열"},
+            "time_text": {"type": "string", "description": "포스터에 적힌 일시 그대로 짧게"},
+            "place": {"type": "string", "description": "장소 이름 (주소가 있으면 함께)"},
+            "host": {"type": "string", "description": "주최·주관"},
+            "fee": {"type": "string", "description": "참가비·입장료 (무료면 '무료', 모르면 빈 문자열)"},
+            "summary": {"type": "string", "description": "주민이 보기 쉬운 1~2문장 소개"},
         },
-        "required": ["category", "confidence", "summary", "severity", "privacy"],
+        "required": ["is_event", "title", "category", "start", "end", "time_text", "place", "host", "fee", "summary"],
     },
 }
-_REPORT_SYSTEM = (
-    "당신은 서울 노원구 월계1동 생활 불편 신고를 분류하는 담당자입니다. "
-    "사진을 보고 가장 알맞은 유형 하나를 고르세요. 보도블록 파손·포트홀은 road_damage, "
-    "보도 위 적치물·단차·볼라드는 obstacle, 계단만 있고 경사로가 없거나 휠체어·유아차가 못 지나가는 곳은 accessibility, "
-    "가로등·벤치·표지판·신호등 고장은 facility 입니다. 확신이 낮으면 confidence를 낮게 주세요."
-)
 
 
-def classify_report(image_jpeg: bytes, user_note: str = "") -> dict:
+def extract_poster(image_jpeg: bytes, today: str) -> dict:
+    """행사 포스터 사진을 읽어 제보 양식을 미리 채울 값을 돌려준다. 연도가 없으면 today 기준으로 가까운 미래."""
     b64 = base64.standard_b64encode(image_jpeg).decode()
     content = [
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-        {"type": "text", "text": "이 사진의 문제 유형을 분류해주세요." + (f"\n신고자 메모: {user_note[:200]}" if user_note else "")},
+        {"type": "text", "text": f"오늘은 {today}입니다. 이 사진의 행사 정보를 읽어주세요. 적혀 있지 않은 정보는 지어내지 말고 빈 문자열로 두세요."},
     ]
-    out = _tool_call(_REPORT_SYSTEM, content, _REPORT_TOOL, 400)
-    cat = out.get("category")
-    if cat not in REPORT_CATEGORIES and cat != "not_issue":
-        cat = "other"
-    return {
-        "category": cat,
-        "confidence": max(0.0, min(1.0, float(out.get("confidence", 0)))),
-        "summary": str(out.get("summary", ""))[:120],
-        "severity": int(out.get("severity", 1)) if str(out.get("severity", "1")).isdigit() else 1,
-        "privacy": bool(out.get("privacy", False)),
-    }
+    out = _tool_call("동네 행사 포스터를 읽고 행사 정보를 정리하는 도우미입니다.", content, _POSTER_TOOL, 700)
+    if out.get("category") not in EVENT_CATEGORIES:
+        out["category"] = "community"
+    return {k: (out.get(k) if k == "is_event" else str(out.get(k) or ""))
+            for k in ("is_event", "title", "category", "start", "end", "time_text", "place", "host", "fee", "summary")}
 
 
 # ------------------------------------------------------------------ 공지사항 → 행사 정보
@@ -211,30 +204,34 @@ def extract_event(title: str, body: str, posted: str) -> dict:
                       content, _EVENT_TOOL, 700)
 
 
-# ------------------------------------------------------------------ 메모 → 가게 종류 (키워드로 못 찾은 것만)
-_TODO_TOOL = {
-    "name": "todo_places",
-    "description": "할 일 메모마다 들러야 할 가게 종류를 고른다.",
+# ------------------------------------------------------------------ 행사 정보 빈칸 채우기
+_FILL_TOOL = {
+    "name": "event_fill",
+    "description": "행사의 비어 있는 정보를 원문에서 찾아 채운다.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "items": {"type": "array", "items": {
-                "type": "object",
-                "properties": {"text": {"type": "string"},
-                               "cats": {"type": "array", "items": {"type": "string"}}},
-                "required": ["text", "cats"]}}
+            "description": {"type": "string", "description": "주민이 보기 쉬운 2~3문장 소개. 원문·알려진 정보에 있는 내용만"},
+            "start": {"type": "string", "description": "시작 YYYY-MM-DD 또는 YYYY-MM-DD HH:MM. 원문에 없으면 빈 문자열"},
+            "end": {"type": "string", "description": "끝 YYYY-MM-DD 또는 YYYY-MM-DD HH:MM. 원문에 없으면 빈 문자열"},
+            "time_text": {"type": "string", "description": "사람이 읽는 일시 설명 (예: 매주 토 14:00~16:00). 없으면 빈 문자열"},
+            "place": {"type": "string", "description": "장소 이름. 없으면 빈 문자열"},
+            "host": {"type": "string", "description": "주최·주관. 없으면 빈 문자열"},
+            "fee": {"type": "string", "description": "참가비·관람료 (무료면 '무료'). 없으면 빈 문자열"},
+            "target": {"type": "string", "description": "참여 대상. 없으면 빈 문자열"},
         },
-        "required": ["items"],
+        "required": ["description", "start", "end", "time_text", "place", "host", "fee", "target"],
     },
 }
 
 
-def categorize_todos(texts: list[str], allowed: list[str]) -> dict[str, list[str]]:
-    content = [{"type": "text", "text": "가능한 가게 종류: " + ", ".join(allowed) +
-                "\n각 메모에 맞는 종류를 1~3개 고르세요 (가게가 필요 없으면 빈 배열):\n" +
-                json.dumps(texts, ensure_ascii=False)}]
-    out = _tool_call("장보기·볼일 메모를 가게 종류로 바꾸는 도우미입니다.", content, _TODO_TOOL, 500)
-    res = {}
-    for it in out.get("items", []):
-        res[it.get("text", "")] = [c for c in it.get("cats", []) if c in allowed]
-    return res
+def fill_event(known: dict, source_text: str, today: str) -> dict:
+    """비어 있는 칸을 원문(source_text)에서 찾아 채운다. 원문이 없으면 소개만 알려진 정보로 짧게 정리."""
+    content = [{"type": "text", "text":
+                f"오늘: {today}\n알려진 정보(JSON): {json.dumps(known, ensure_ascii=False)}\n\n"
+                f"원문:\n{(source_text or '(원문 없음)')[:7000]}"}]
+    system = ("지역 행사 정보를 정리하는 도우미입니다. 알려진 정보에서 비어 있는 항목만 채우세요. "
+              "원문이나 알려진 정보에 근거가 없는 날짜·장소·요금·주최는 절대 지어내지 말고 빈 문자열로 두세요. "
+              "소개는 알려진 사실만으로 2~3문장, 과장 없이 쓰세요.")
+    out = _tool_call(system, content, _FILL_TOOL, 700)
+    return {k: str(out.get(k) or "").strip() for k in _FILL_TOOL["input_schema"]["properties"]}

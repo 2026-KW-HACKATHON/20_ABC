@@ -81,22 +81,46 @@ def import_doc(db: Session, doc: dict, status: str = "approved") -> dict:
     return {"added": added, "skipped": skipped}
 
 
-def import_bundled(db: Session) -> list[dict]:
-    """서버 시작 시: 함께 들어 있는 공식 자료 JSON을 모두 등록 (새 행사만)."""
-    out = []
+MARK = DATA_DIR / "official_imported.json"     # 이미 한 번 넣은 자료 (행사를 초기화해도 서버를 켤 때 다시 들어오지 않게)
+
+
+def _marks() -> dict:
+    try:
+        return json.loads(MARK.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def import_bundled(db: Session, force: bool = False) -> list[dict]:
+    """서버 시작 시: 함께 들어 있는 공식 자료 JSON 중 아직 넣지 않은 파일만 등록 (새 행사만).
+    force=True 이면 이미 넣은 파일도 다시 넣음 (관리자 '구청 자료 다시 넣기')."""
+    out, marks = [], _marks()
     for d in (SEED_DIR, DATA_DIR / "official"):
         if not d.exists():
             continue
         for f in sorted(d.glob("*.json")):
+            raw = f.read_bytes()
+            sig = hashlib.sha1(raw).hexdigest()[:16]
+            if not force and marks.get(f.name) == sig:
+                continue
             try:
-                doc = json.loads(f.read_text(encoding="utf-8"))
+                doc = json.loads(raw.decode("utf-8"))
                 r = import_doc(db, doc)
                 if r["added"]:
+                    from . import places
+                    places.fill_missing(db)
+                if r["added"]:
                     log.info("공식 행사 자료 %s: %d건 등록", f.name, r["added"])
+                marks[f.name] = sig
                 out.append({"file": f.name, **r})
             except Exception as e:
                 db.rollback()
                 log.warning("공식 행사 자료 %s 읽기 실패: %s", f.name, e)
+    try:
+        MARK.parent.mkdir(parents=True, exist_ok=True)
+        MARK.write_text(json.dumps(marks, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
     return out
 
 
@@ -165,6 +189,8 @@ def import_upload(db: Session, filename: str, raw: bytes) -> dict:
             raise ValueError("JSON에 events 목록이 없습니다.")
         status = "approved"
     res = import_doc(db, doc, status=status)
+    from . import places          # 좌표 없는 행사는 장소 이름으로 위치 찾기 (월계도서관 → 월계문화정보도서관 등)
+    res["located"] = places.fill_missing(db)["found"]
     # 다음에 서버를 다시 켜도 남도록 원본 목록을 보관 (JSON만)
     if status == "approved":
         d = DATA_DIR / "official"

@@ -12,7 +12,7 @@ from ..auth import require_user
 from ..db import get_db
 from ..models import PATH_KINDS, Construction, PathEdit, User, now
 from ..services import geo
-from ..services.todo_cats import POI_LABELS
+from ..services.poi_labels import POI_LABELS
 from .events import iso
 
 router = APIRouter(prefix="/api/map", tags=["map"])
@@ -55,7 +55,7 @@ def graph_with_overlays(db: Session) -> dict:
         base = geo.base_graph()
         g = geo.apply_overlays(
             base,
-            [{"kind": e.kind, "coords": json.loads(e.coords), "open_hours": e.open_hours} for e in edits],
+            [{"kind": e.kind, "open_hours": e.open_hours, **_geom(e.coords)} for e in edits],
             [{"lat": c.lat, "lng": c.lng, "radius_m": c.radius_m} for c in cons])
         g["z"] = [construction_out(c) for c in cons]
         _graph_cache.update(sig=sig, data=g)
@@ -85,22 +85,55 @@ def constructions(db: Session = Depends(get_db)):
 # ------------------------------------------------------------------ 길 제보
 class PathIn(BaseModel):
     kind: str
-    coords: list[list[float]] = Field(min_length=1, max_length=60)
+    coords: list[list[float]] = Field(default_factory=list, max_length=60)
+    # 계단·가파른 길은 손가락으로 칠한 범위: 여러 획(각 획은 점 목록) + 붓 반지름(m)
+    strokes: list[list[list[float]]] | None = Field(default=None, max_length=30)
+    brush_m: float = Field(default=8, ge=3, le=25)
     note: str = Field(default="", max_length=500)
     open_hours: str = Field(default="", max_length=40)
 
 
+PAINT_KINDS = ("stairs", "steep")
+
+
+def _geom(raw: str) -> dict:
+    """저장된 좌표 JSON → {coords, strokes, brush_m}. 칠하기 제보는 {"strokes": [...], "r": 8} 형태로 저장."""
+    c = json.loads(raw)
+    if isinstance(c, dict):
+        return {"coords": [], "strokes": c.get("strokes") or [], "brush_m": c.get("r", 8)}
+    return {"coords": c, "strokes": None, "brush_m": None}
+
+
+def path_coords_json(body: PathIn) -> str:
+    if body.strokes:
+        return json.dumps({"strokes": [[[round(a, 6), round(b, 6)] for a, b in s] for s in body.strokes],
+                           "r": round(body.brush_m, 1)})
+    return json.dumps(body.coords)
+
+
 def path_out(p: PathEdit) -> dict:
-    return {"id": p.id, "kind": p.kind, "kind_label": PATH_KINDS.get(p.kind, ""), "coords": json.loads(p.coords),
+    return {"id": p.id, "kind": p.kind, "kind_label": PATH_KINDS.get(p.kind, ""), **_geom(p.coords),
             "note": p.note, "open_hours": p.open_hours, "status": p.status, "created_at": iso(p.created_at)}
 
 
 def validate_path(body: PathIn) -> None:
     if body.kind not in PATH_KINDS:
         raise HTTPException(400, "제보 종류가 올바르지 않습니다.")
+    if body.strokes is not None:
+        if body.kind not in PAINT_KINDS:
+            raise HTTPException(400, "칠하기는 계단·가파른 길 제보에서만 쓸 수 있습니다.")
+        pts = [c for s in body.strokes for c in s]
+        if not pts or any(not s for s in body.strokes):
+            raise HTTPException(400, "지도 위를 손가락으로 칠해주세요.")
+        if len(pts) > 1500:
+            raise HTTPException(400, "칠한 범위가 너무 넓습니다. 나눠서 제보해주세요.")
+    else:
+        pts = body.coords
+        if not pts:
+            raise HTTPException(400, "지도에 위치를 찍어주세요.")
     if body.kind in ("add", "gate") and len(body.coords) < 2:
         raise HTTPException(400, "길은 두 점 이상 찍어주세요.")
-    for c in body.coords:
+    for c in pts:
         if len(c) != 2 or not (37.55 < c[0] < 37.70 and 126.98 < c[1] < 127.15):
             raise HTTPException(400, "월계1동 근처 좌표만 제보할 수 있습니다.")
     if body.open_hours and not _valid_hours(body.open_hours):
@@ -125,7 +158,7 @@ def submit_path(body: PathIn, user: User = Depends(require_user), db: Session = 
         PathEdit.user_id == user.id, PathEdit.status == "pending"))
     if recent >= 20 and not user.is_admin:
         raise HTTPException(429, "검토 대기 중인 길 제보가 너무 많습니다. 승인 후 다시 제보해주세요.")
-    p = PathEdit(user_id=user.id, kind=body.kind, coords=json.dumps(body.coords), note=body.note.strip(),
+    p = PathEdit(user_id=user.id, kind=body.kind, coords=path_coords_json(body), note=body.note.strip(),
                  open_hours=body.open_hours.strip(), status="approved" if user.is_admin else "pending")
     db.add(p)
     db.commit()

@@ -80,6 +80,11 @@ def update_me(body: MeIn, user: User = Depends(require_user), db: Session = Depe
 def delete_me(user: User = Depends(require_user), db: Session = Depends(get_db)):
     if user.is_admin:
         raise HTTPException(400, "관리자 계정은 앱에서 탈퇴할 수 없습니다.")
+    from ..models import Review
+    from .media import delete_review_files
+    for r in db.query(Review).filter(Review.user_id == user.id).all():   # 후기 사진·영상 파일도 지움
+        delete_review_files(r)
+        db.delete(r)
     db.delete(user)
     db.commit()
     return {"ok": True}

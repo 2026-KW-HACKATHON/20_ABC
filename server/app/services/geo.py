@@ -318,7 +318,18 @@ def build_basemap(feats: list[dict]) -> dict:
         seen.add(p["name"])
     lats = [pt[0] for rg in area_rings for pt in rg]
     lngs = [pt[1] for rg in area_rings for pt in rg]
-    return {"b": boundary, "a": area_rings, "an": sorted(area) or ["월계1동"],
+    # 월계동 전체 바깥 경계선 (월계1·2·3동을 합친 모양, 동 사이 틈은 메움)
+    outline = []
+    if len(area) > 1:
+        try:
+            u = unary_union([Polygon([(q[1], q[0]) for q in rg]).buffer(0) for rg in area_rings])
+            u = u.buffer(0.00004).buffer(-0.00004)
+            for pg in (u.geoms if hasattr(u, "geoms") else [u]):
+                if pg.area > 1e-7:
+                    outline.append([[round(y, 5), round(x, 5)] for x, y in pg.exterior.coords[:-1]])
+        except Exception:
+            outline = []
+    return {"b": boundary, "a": area_rings, "ao": outline, "an": sorted(area) or ["월계1동"],
             "ab": [[min(lats), min(lngs)], [max(lats), max(lngs)]], "p": polys, "l": lines, "t": labels}
 
 
@@ -607,10 +618,24 @@ def apply_overlays(base: dict, path_edits: list[dict], constructions: list[dict]
     segs = [LineString([P.xy(nodes[e[0]][1], nodes[e[0]][0]), P.xy(nodes[e[1]][1], nodes[e[1]][0])]) for e in E]
     tree = STRtree(segs)
     for pe in path_edits:
-        coords = pe["coords"]
-        if pe["kind"] not in ("block", "stairs", "steep") or not coords:
+        coords = pe.get("coords") or []
+        strokes = pe.get("strokes")
+        if pe["kind"] not in ("block", "stairs", "steep") or not (coords or strokes):
             continue
         flag = {"block": F_BLOCK, "stairs": F_STAIRS, "steep": F_STEEP}[pe["kind"]]
+        if strokes:
+            # 손가락으로 칠한 범위: 획마다 붓 반지름만큼 넓힌 면. 경로 구간이 이 면을 지나가면 계단·가파른 길로 봄
+            parts = [LineString([P.xy(c[1], c[0]) for c in s]) if len(s) >= 2 else Point(P.xy(s[0][1], s[0][0]))
+                     for s in strokes if s]
+            zone = unary_union(parts).buffer(float(pe.get("brush_m") or 8))
+            for k in tree.query(zone):
+                k = int(k)
+                seg = segs[k]
+                inside = zone.intersection(seg).length
+                if inside >= min(3.0, seg.length * 0.5) or (seg.length < 1 and zone.intersects(seg)):
+                    E[k][4] |= flag
+            applied += 1
+            continue
         geom = LineString([P.xy(c[1], c[0]) for c in coords]) if len(coords) >= 2 else Point(P.xy(coords[0][1], coords[0][0]))
         zone = geom.buffer(7)
         for k in tree.query(zone):
@@ -628,7 +653,7 @@ def apply_overlays(base: dict, path_edits: list[dict], constructions: list[dict]
 
 
 # ---------------------------------------------------------------- 캐시
-BUILD_VERSION = "3"      # 캐시 형식이 바뀌면 올림 (월계동 범위 'a' 추가)
+BUILD_VERSION = "7"      # 캐시 형식이 바뀌면 올림 (월계동 바깥 경계 'ao' 추가)
 
 
 def _cached(name: str, builder):
@@ -674,15 +699,27 @@ def reset_cache():
         generation += 1
     for f in DATA_DIR.glob("cache_*.json"):
         f.unlink(missing_ok=True)
+    _area_memo.clear()
 
 
 def boundary_contains(lat, lng) -> bool:
     return _pip([lat, lng], basemap()["b"])
 
 
+_area_memo: dict = {}
+
+
 def area_contains(lat, lng) -> bool:
-    """월계동(서비스 범위) 안인지."""
-    return any(_pip([lat, lng], rg) for rg in basemap().get("a") or [basemap()["b"]])
+    """월계동(서비스 범위) 안인지. (행사 목록마다 여러 번 불리므로 결과를 기억해 둠)"""
+    key = (round(lat, 6), round(lng, 6))
+    hit = _area_memo.get(key)
+    if hit is None:
+        s, w, n, e = area_bbox()
+        hit = s <= lat <= n and w <= lng <= e and any(_pip([lat, lng], rg) for rg in basemap().get("a") or [basemap()["b"]])
+        if len(_area_memo) > 20000:
+            _area_memo.clear()
+        _area_memo[key] = hit
+    return hit
 
 
 def area_bbox() -> tuple[float, float, float, float]:

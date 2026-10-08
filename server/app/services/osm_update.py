@@ -76,31 +76,82 @@ def import_geojson(raw_bytes: bytes) -> dict:
             "graph": geo.base_graph()["stats"], "pois": len(geo.pois())}
 
 
-def fetch_elevation() -> dict:
-    """Open-Meteo 고도 API(Copernicus 90m DEM)로 보행 그래프 노드의 고도를 받아 경사도 계산에 사용."""
-    nodes = geo.base_graph()["n"]
-    out: dict[str, float] = {}
-    f = DATA_DIR / "elevation.json"
-    if f.exists():
-        out = json.loads(f.read_text())
-    todo = [n for n in nodes if geo._nkey(n) not in out]
+def _bilinear(z, s, w, dlat, dlng, lat, lng):
+    ny, nx = len(z), len(z[0])
+    fy, fx = (lat - s) / dlat, (lng - w) / dlng
+    if not (0 <= fy <= ny - 1 and 0 <= fx <= nx - 1):
+        return None
+    y0, x0 = min(int(fy), ny - 2), min(int(fx), nx - 2)
+    ty, tx = fy - y0, fx - x0
+    v = [z[y0][x0], z[y0][x0 + 1], z[y0 + 1][x0], z[y0 + 1][x0 + 1]]
+    if any(a is None for a in v):
+        return None
+    return (v[0] * (1 - tx) + v[1] * tx) * (1 - ty) + (v[2] * (1 - tx) + v[3] * tx) * ty
+
+
+def fetch_elevation(pause: float = 11.0) -> dict:
+    """Open-Meteo 고도 API(Copernicus 90m DEM)로 월계동 위에 약 90m 간격 격자의 고도를 받아,
+    보행 그래프의 각 점 고도를 보간해 경사도를 계산한다.
+
+    무료 이용 한도(분당 600곳, 하루 1만 곳)를 넘지 않도록 격자로 받고(약 1,200곳), 요청 사이에 쉰다.
+    한 번 받은 격자는 elevation_grid.json 에 저장해 다시 받지 않음. 키 필요 없음.
+    """
+    s, w, n, e = geo.area_bbox()
+    pad = 0.0025                                   # 경계 밖 약 250m 여유
+    s, w, n, e = round(s - pad, 4), round(w - pad, 4), round(n + pad, 4), round(e + pad, 4)
+    dlat, dlng = 0.0008, 0.001                     # 약 89m × 88m
+    ny, nx = int((n - s) / dlat) + 2, int((e - w) / dlng) + 2
+    key = f"{s},{w},{dlat},{dlng},{ny},{nx}"
+    gfile = DATA_DIR / "elevation_grid.json"
+    grid = None
+    if gfile.exists():
+        try:
+            g = json.loads(gfile.read_text())
+            if g.get("key") == key:
+                grid = g
+        except Exception:
+            grid = None
+    if grid is None:
+        grid = {"key": key, "z": [[None] * nx for _ in range(ny)]}
+    z = grid["z"]
+    todo = [(y, x) for y in range(ny) for x in range(nx) if z[y][x] is None]
+    got = failed = 0
     with httpx.Client(timeout=30) as client:
         for i in range(0, len(todo), 100):
             chunk = todo[i:i + 100]
-            params = {"latitude": ",".join(f"{n[0]:.6f}" for n in chunk),
-                      "longitude": ",".join(f"{n[1]:.6f}" for n in chunk)}
-            for attempt in range(3):
+            params = {"latitude": ",".join(f"{s + y * dlat:.5f}" for y, _ in chunk),
+                      "longitude": ",".join(f"{w + x * dlng:.5f}" for _, x in chunk)}
+            ok = False
+            for attempt in range(5):
                 try:
                     r = client.get("https://api.open-meteo.com/v1/elevation", params=params)
+                    if r.status_code == 429:           # 분당 한도 → 1분 쉬고 다시
+                        time.sleep(65)
+                        continue
                     r.raise_for_status()
-                    for n, e in zip(chunk, r.json()["elevation"]):
-                        out[geo._nkey(n)] = float(e)
+                    for (y, x), v in zip(chunk, r.json()["elevation"]):
+                        z[y][x] = float(v)
+                    got += len(chunk)
+                    ok = True
                     break
-                except Exception as e:
-                    log.warning("고도 받기 재시도 %s: %s", attempt, e)
-                    time.sleep(2 + attempt * 3)
-            time.sleep(0.3)
-    f.write_text(json.dumps(out))
+                except Exception as ex:
+                    log.warning("고도 받기 재시도 %s: %s", attempt, ex)
+                    time.sleep(3 + attempt * 5)
+            if not ok:
+                failed += len(chunk)
+            gfile.write_text(json.dumps(grid))       # 중간에 끊겨도 받은 만큼은 남김
+            if pause and i + 100 < len(todo):
+                time.sleep(pause)
+    # 그래프 점마다 격자에서 보간
+    out: dict[str, float] = {}
+    for nd in geo.base_graph()["n"]:
+        v = _bilinear(z, s, w, dlat, dlng, nd[0], nd[1])
+        if v is not None:
+            out[geo._nkey(nd)] = round(v, 2)
+    (DATA_DIR / "elevation.json").write_text(json.dumps(out))
     geo.reset_cache()
-    g = geo.base_graph()
-    return {"ok": True, "nodes": len(out), "graph": g["stats"]}
+    gr = geo.base_graph()
+    missing = sum(v is None for row in z for v in row)
+    return {"ok": missing == 0, "grid_points": ny * nx, "fetched_now": got, "missing": missing,
+            "nodes_with_elevation": len(out), "graph": gr["stats"],
+            **({"note": "일부를 받지 못했습니다. 잠시 뒤 '고도 받기'를 다시 누르면 남은 부분만 받습니다."} if missing else {})}
