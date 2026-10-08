@@ -1,0 +1,6 @@
+**/__pycache__
+**/.pytest_cache
+server/data
+server/.env
+android
+*.md

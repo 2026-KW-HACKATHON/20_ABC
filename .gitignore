@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+.venv/
+server/data/
+server/.env
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+*.apk
+*.aab
+*.jks
+server/.env.example

@@ -84,7 +84,7 @@ Claude를 쓰면 기본 모델 `claude-haiku-4-5-20251001` 기준으로 포스�
 
 ## 3. 무료 클라우드에 올리기 (Render + Neon)
 
-1. 이 폴더를 GitHub 저장소에 올립니다. `.gitignore`가 `.env`와 `data/`를 제외합니다.
+1. 이 폴더를 GitHub 저장소에 올립니다. `.gitignore`가 `server/.env`, `server/.env.example`(키·비밀번호가 들어갈 수 있음), `server/data/`, 빌드 산출물(APK 포함)을 제외합니다.
 2. [Neon](https://neon.tech)에서 무료 PostgreSQL을 만들고 연결 주소를 복사합니다. Render 무료 서버는 재시작하면 파일이 지워져서 SQLite로는 데이터가 사라집니다.
 3. [Render](https://render.com) → **New → Blueprint** → 저장소 선택. `render.yaml`이 자동으로 읽힙니다.
 4. 환경변수 `ADMIN_PASSWORD`, `GEMINI_API_KEY`, `SEOUL_API_KEY`, `DATABASE_URL`을 채우고 배포합니다.
